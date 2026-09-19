@@ -1,0 +1,8 @@
+node_modules
+.next
+.git
+legacy-python
+.npmrc
+.DS_Store
+*.md
+tests

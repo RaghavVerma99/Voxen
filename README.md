@@ -1,9 +1,10 @@
-# Voice Agent — MVP
+# Voice Agent — MVP (Next.js + Node.js)
 
-A browser-based **AI voice assistant**: talk into your microphone, see your transcript, get an LLM answer, and hear it spoken back — including web-search tool calling — all served from a single FastAPI service.
+A browser-based **AI voice assistant**: talk into your microphone, see your transcript, get an LLM answer, and hear it spoken back — including web-search tool calling — in a single full-stack **Next.js (React) + TypeScript** app.
 
 > **Phase:** MVP (Milestone 0–6 of `voice_agent_mvp.md`). It works, it's tested, it's deployable.
-> The long-term architecture and roadmap living in `distributed_voice_agent_project.md` are intentionally **not** implemented yet.
+> The long-term architecture and roadmap described in the [Roadmap](#roadmap) section below are intentionally **not** implemented yet.
+> The original Python/FastAPI MVP is preserved under `legacy-python/` for reference.
 
 ---
 
@@ -50,34 +51,33 @@ The AI pipeline is **push-to-talk → STT → LLM (+ tools) → TTS**, run in a 
 USER
  │  microphone
  ▼
-┌─────────────────┐
-│ Browser Frontend │  HTML/CSS/JS, MediaRecorder (webm/opus)
-│ (served by same │  1. records audio (push-to-talk)
-│     backend)    │  2. uploads via multipart POST
-└────────┬────────┘
-         │ HTTP POST /api/voice  (multipart: audio, session_id, audio_duration)
-         ▼
-┌───────────────────────────────┐
-│      FastAPI backend          │
-│                               │
-│  main.py        ─ routing + error mapping
-│  conversation.py─ in-memory session-keyed history
-│  ai.py          ─ OpenAI provider calls (STT / LLM / TTS)
-│  tools.py       ─ search_web() via DuckDuckGo
-│  schemas.py     ─ Pydantic request/response models
-│  config.py      ─ env-driven settings
-└──────┬────────────────────────┘
+┌────────────────────────────────────┐
+│ Next.js App (React frontend + API) │
+│                                    │
+│ app/components/VoiceAgent.tsx (client component)
+│   - MediaRecorder webm/opus push-to-talk
+│   - status state machine + chat log
+│                                    │
+│ app/api/* (route handlers, server) │
+│   - chat / voice / reset / health  │
+│                                    │
+│ lib/                               │
+│   ai.ts          OpenAI calls      │
+│   conversation.ts session history  │
+│   tools.ts       DuckDuckGo search │
+│   config.ts / errors.ts / http.ts  │
+└──────┬─────────────────────────────┘
        │
        ├──► gpt-4o-mini-transcribe   (OpenAI)   audio → text
        ├──► gpt-4o-mini + tools      (OpenAI)   text → reply (can call search_web)
-       │        └─► DuckDuckGo       (ddgs)     query → results
+       │        └─► DuckDuckGo Lite  (cheerio)  query → results
        ├──► gpt-4o-mini-tts          (OpenAI)   text → mp3 (base64 in JSON)
        │
        ▼
   Speaker output in browser
 ```
 
-**Deployment topology:** the static frontend is served by the backend itself (`/` mount). One service, no CORS in production, no separate static host.
+**Deployment topology:** one Next.js app serves both the UI and the API — a single deployable unit with no CORS in production.
 
 ---
 
@@ -89,9 +89,9 @@ USER
 MediaRecorder captures webm/opus  (max 60s, auto-stop timer)
         │
         ▼
-POST /api/voice  (multipart)
+POST /api/voice  (multipart: audio, session_id, audio_duration)
         │
-        ├─ validations: non-empty < 10MB, duration ≤ max_audio_seconds
+        ├─ validations: File present, < 10MB, duration ≤ max_audio_seconds
         ▼
 STT   gpt-4o-mini-transcribe  →  transcript text          (if empty → NOTHING_HEARD)
         │
@@ -112,7 +112,7 @@ conversation.append(assistant, reply)
 TTS   gpt-4o-mini-tts  →  mp3 bytes  →  base64  (failure degrades to audio=null)
         │
         ▼
-200 {"transcript", "reply", "audio", "history"}   → frontend plays audio, renders chat
+200 {"transcript", "reply", "audio", "history"}   → React plays audio, renders chat
 ```
 
 ### Text path (`/api/chat`)
@@ -125,17 +125,17 @@ Same pipeline minus audio capture/STT/TTS — used for quick testing without a m
 
 | Layer | Choice | Version tested | Why |
 | --- | --- | --- | --- |
-| Runtime | Python | 3.14 local / 3.12 Docker | 3.14 is this machine's interpreter; image pinned to 3.12-slim for portability |
-| API framework | FastAPI + Uvicorn | fastapi 0.141 / uvicorn 0.53 | Async, typed Pydantic contracts, effortless static mounting |
-| Frontend | Vanilla HTML/CSS/JS | — | No build step, trivially static-hostable |
-| STT | OpenAI `gpt-4o-mini-transcribe` | openai SDK 3.x | Cheap one-shot transcription; one API key for all AI |
-| LLM | OpenAI `gpt-4o-mini` | openai SDK 3.x | Fast, cheap, supports function calling |
-| TTS | OpenAI `gpt-4o-mini-tts` (voice `alloy`, mp3) | openai SDK 3.x | Good quality per dollar; single key |
-| Web search | DuckDuckGo via `ddgs` | ddgs 9.x | Zero API key → MVP keeps just one secret |
-| Validation | Pydantic v2 | 2.13 | Built into FastAPI |
-| Testing | pytest + TestClient | pytest 9.x | Mocked AI layer → runs with no key/no network |
+| Runtime | Node.js | 22 | LTS; global fetch/FormData/File, `AbortSignal.timeout` |
+| Framework | Next.js (App Router) | 16.3 | Full-stack React: one app serves UI + API; statically-exports-friendly; standalone build for Docker |
+| UI | React | 19.3 | Standard for Next.js |
+| Language | TypeScript | 7 | Strict typing across routes, lib, and tests |
+| STT | OpenAI `gpt-4o-mini-transcribe` | openai SDK 7.x | Cheap one-shot transcription; one API key for all AI |
+| LLM | OpenAI `gpt-4o-mini` | openai SDK 7.x | Fast, cheap, supports function calling |
+| TTS | OpenAI `gpt-4o-mini-tts` (voice `alloy`, mp3) | openai SDK 7.x | Good quality per dollar; single key |
+| Web search | DuckDuckGo Lite + `cheerio` | cheerio 1.2 | Zero API key → MVP keeps just one secret |
+| Test runner | Vitest | 5.x | Fast, TS-native, asserts route handlers with mocked AI |
 
-Requirements are pinned as **floors** (`>=`) in `backend/requirements.txt` rather than exact pins — CI/Docker resolve the latest compatible versions.
+Runtime deps in `package.json` are caret-pinned; `package-lock.json` locks the tested set.
 
 ---
 
@@ -145,27 +145,55 @@ Documented so the *why* survives the *what*.
 
 | # | Decision | Rationale |
 | --- | --- | --- |
-| 1 | **One deployable unit** — backend mounts and serves `frontend/` | Static frontend + API on one Render/Railway service removes CORS entirely for MVP. Split later if the frontend grows into React. |
-| 2 | **Session-keyed conversations in memory** (`dict[session_id, messages]`) | Fixes the original plan's global-list bug: two users no longer corrupt one shared history, and `/api/reset` clears **only** the target session. No DB needed for MVP. |
+| 1 | **One full-stack Next.js app**, not a separate API server | React UI + route handlers ship as one artifact. No CORS, one service to deploy (Vercel, Render, or the Docker image). Decision supersedes the original FastAPI design (#1 of the Python MVP). |
+| 2 | **Session-keyed conversations in memory** (`Map<session_id, messages[]>` in `lib/conversation.ts`) | Two users never corrupt one shared history; `/api/reset` clears **only** the target session. No DB needed for MVP. |
 | 3 | **History is server-owned**, capped at last 20 messages after the system prompt | Client sends only `session_id`; server builds context. The cap bounds token usage instead of letting histories grow unbounded. |
 | 4 | **Audio returned as base64 mp3 in JSON** | Frontend stays trivial: `new Audio("data:audio/mpeg;base64,"+b64)`. No signed-URL endpoints, no storage. |
-| 5 | **Half-duplex HTTP, not WebSocket streaming** | The MVP prioritizes a *reliable* loop over a *low-latency* one. Streaming (WebSocket/WebRTC) is the explicit next phase — see `distributed_voice_agent_project.md`. Expected full round trip ≈ 5–15 s. |
-| 6 | **`response_format="text"` on STT** | Returns a plain string instead of a JSON wrapper — least parsing surface. |
-| 7 | **LLM tool-calling loop, ≤ 4 rounds** | The agent can call `search_web`, receive results, and answer. Rounds are bounded so a loop cannot spin forever. Unknown tools → structured error string the LLM sees, never an exception. |
-| 8 | **DuckDuckGo (no key) inside `tools.py`** | Keeps the MVP to a single secret (`OPENAI_API_KEY`). Trade-off: DDG is best-effort; quality improves later by swapping the one function behind the same `run_tool` interface. |
+| 5 | **Half-duplex HTTP, not WebSocket streaming** | The MVP prioritizes a *reliable* loop over a *low-latency* one. Streaming (WebSocket/WebRTC) is the explicit next phase — see [Roadmap](#roadmap). Expected round trip ≈ 5–15 s. |
+| 6 | **`response_format="text"` on STT** | The SDK overload returns a plain string — least parsing surface. |
+| 7 | **LLM tool-calling loop, ≤ 4 rounds (`MAX_TOOL_ROUNDS`)** | The agent can call `search_web`, receive results, and answer. Rounds are bounded so a loop cannot spin forever. Non-function tool calls and unknown tools fail gracefully as structured output, never an exception. |
+| 8 | **DuckDuckGo Lite + cheerio inside `tools.ts`** | Keeps the MVP to a single secret (`OPENAI_API_KEY`) and no third-party scraping SDK. The 5-line `runTool` interface is the swap point for Tavily/Bing later. |
 | 9 | **TTS failure does not fail the request** | If speech generation fails, the client still gets `reply` text and `audio: null`. Text always wins; speech is best-effort. |
-| 10 | **Typed error contract** — every error carries `{error_code, message}` | The frontend shows a stable message, and future tooling (monitoring, retries) can branch on `error_code` instead of HTTP-status heuristics. |
-| 11 | **CORS only when configured** | Middleware is added only when `CORS_ORIGINS` is non-empty; the recommended same-origin deployment stays open without extra config. |
-| 12 | **API key lives in env; an OpenAI client is built per call** (`ai._new_client()`) | The browser never touches `OPENAI_API_KEY`; building per call lets config and tests vary cleanly. |
-| 13 | **Frontend single-flight + status state machine** | Controls disable during processing so overlapping uploads can't interleave conversation history; status (`ready → recording → thinking → speaking → error`) drives all UI feedback. |
+| 10 | **Typed error contract** — every error carries `{error_code, message}` | The frontend shows a stable message; future tooling (monitoring, retries) can branch on `error_code`. |
+| 11 | **`output: "standalone"`** | Produces a small self-contained `server.js` for the Docker image — no Node modules at runtime. |
+| 12 | **API key lives in env; a fresh OpenAI client is built per call** (`lib/ai.ts::client()`) | The browser never touches `OPENAI_API_KEY`; per-call construction makes mocking and config trivial. |
+| 13 | **Frontend single-flight + status state machine** | Controls disable during processing so overlapping uploads can't interleave history; status (`ready → recording → thinking → speaking → error`) drives all UI feedback via React state, not DOM surgery. |
+
+---
+
+## Project structure
+
+```
+.
+├── app/
+│   ├── api/
+│   │   ├── chat/route.ts     POST /api/chat
+│   │   ├── voice/route.ts    POST /api/voice
+│   │   ├── reset/route.ts    POST /api/reset
+│   │   └── health/route.ts   GET  /api/health
+│   ├── components/VoiceAgent.tsx   client component (recorder + UI)
+│   ├── layout.tsx
+│   ├── page.tsx
+│   └── globals.css
+├── lib/
+│   ├── ai.ts          STT / LLM tool loop / TTS (OpenAI)
+│   ├── tools.ts       search_web (DuckDuckGo Lite) + runTool dispatch
+│   ├── conversation.ts  Map-based session history
+│   ├── config.ts      env-driven settings
+│   ├── errors.ts      AppError + error codes
+│   └── http.ts        error → NextResponse mapper
+├── tests/             vitest suites (no API key or network needed)
+├── legacy-python/     the original FastAPI MVP (preserved)
+├── next.config.mjs / tsconfig.json / vitest.config.ts
+├── Dockerfile / .dockerignore
+└── .env.example
+```
 
 ---
 
 ## API reference
 
-### `GET /health`
-
-Liveness probe.
+### `GET /api/health`
 
 ```json
 200 {"status": "ok"}
@@ -173,7 +201,7 @@ Liveness probe.
 
 ### `POST /api/chat`
 
-Text-only turn. State is server-side and session-keyed; a missing `session_id` creates a new one (returned in the response).
+Text-only turn. A missing `session_id` creates a new one (returned in the response).
 
 ```json
 // request
@@ -191,7 +219,7 @@ Validation: `EMPTY_MESSAGE` (400) if the message is blank.
 
 ### `POST /api/voice`
 
-The core endpoint. `multipart/form-data` fields:
+`multipart/form-data` fields:
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -225,34 +253,38 @@ Clears **only** that session's history. `MISSING_SESSION` (400) without `session
 
 ## Conversation state
 
-```python
-conversations: dict[str, list[dict]] = {
-    "session-id": [
-        {"role": "system",    "content": <SYSTEM_PROMPT>},   # always first
-        {"role": "user",      "content": "…"},
-        {"role": "assistant", "content": "…"},
-        # … capped at max_history_messages (default 20) + the system prompt
-    ]
+```ts
+export interface ChatMessage {
+  role: "system" | "user" | "assistant";
+  content: string;
 }
+
+const conversations = new Map<string, ChatMessage[]>();
+// "session-id": [
+//   { role: "system", content: <SYSTEM_PROMPT> },   // always first
+//   { role: "user", content: "…" },
+//   { role: "assistant", content: "…" },
+//   // … capped at max_history_messages (default 20) + the system prompt
+// ]
 ```
 
-- Lives in-process (module dict in `conversation.py`) — **lost on restart/redeploy**, by design for MVP.
+- Lives in-process (`lib/conversation.ts`) — **lost on restart/redeploy**, by design for MVP.
 - The system prompt tells the model to respond naturally and concisely, and to use `search_web` for anything after its knowledge cutoff.
-- Truncation keeps the newest 20 messages after the system prompt to bound LLM token usage.
+- Truncation keeps the newest 20 messages after the system prompt to bound LLM token usage. Tool messages are appended only to the LLM request copy, never the stored history.
 
 ---
 
 ## Frontend behavior
 
-Plain vanilla JS — no framework, no build step.
+A single React client component — no build-time static HTML, all interaction via state + refs.
 
 - **Push-to-talk:** click to record → click again, or the recorder **auto-stops at 60 s**.
 - **Microphone denied:** shows a message; the app stays usable.
 - **Single flight:** all controls disabled from upload until the response finishes or errors.
-- **Status states:** `Ready → Recording… → Thinking… → Speaking… → Ready`, plus `Error` on failure — one element (`#status`) drives the whole UI.
+- **Status states:** `Ready → Recording… → Thinking… → Speaking… → Ready`, plus `Error` on failure.
 - **Session persistence:** `session_id` stored in `localStorage` (via `crypto.randomUUID`), so reloads keep the same conversation server-side.
 - **Audio playback:** `Audio` element with a `data:audio/mpeg;base64,…` source; plays automatically once the reply renders.
-- **Reset:** clears server history via `/api/reset` and empties the transcript log locally.
+- **Reset:** clears server history via `/api/reset` and empties the chat log locally.
 
 ---
 
@@ -262,22 +294,21 @@ Plain vanilla JS — no framework, no build step.
 | --- | --- | --- |
 | 400 | `EMPTY_MESSAGE` | `/api/chat` message is blank |
 | 400 | `MISSING_SESSION` | `/api/reset` without `session_id` |
-| 400 | `EMPTY_AUDIO` | No audio bytes uploaded |
+| 400 | `EMPTY_AUDIO` | No audio file uploaded or empty file |
 | 413 | `AUDIO_TOO_LARGE` | Upload exceeds `MAX_AUDIO_BYTES` (10 MB) |
 | 413 | `AUDIO_TOO_LONG` | `audio_duration` exceeds `MAX_AUDIO_SECONDS` (60 s) |
 | 400 | `NOTHING_HEARD` | STT returned no speech |
 | 502 | `STT_FAILED` | Transcription call failed (bad key, upstream 5xx, timeout, …) |
 | 502 | `LLM_FAILED` | Chat-completions or tool-loop failure |
+| 500 | `INTERNAL` | Any unexpected handler error |
 
-Error responses carry the shape `{"detail": {"error_code": …, "message": …}}` (FastAPI's HTTPException detail).
-
-**`TTS_FAILED` never surfaces** — TTS exceptions are swallowed and `audio` is returned as `null` (decision #9). Tool-execution errors are returned *as tool output for the LLM*, not as API errors.
+Error responses carry `{"detail": {"error_code": …, "message": …}}`. **`TTS_FAILED` never surfaces** — TTS exceptions are swallowed and `audio` is returned as `null` (decision #9). Tool-execution errors are returned *as tool output for the LLM*, not as API errors.
 
 ---
 
 ## Configuration
 
-All settings come from environment variables via `python-dotenv`, loaded from the backend working directory upward — so either `backend/.env` or a repo-root `.env` works.
+Next.js auto-loads `.env` from the project root for `dev`, `build`, and `start`. On Render/Vercel, set the variables directly in the dashboard.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -286,7 +317,7 @@ All settings come from environment variables via `python-dotenv`, loaded from th
 | `LLM_MODEL` | `gpt-4o-mini` | Chat model |
 | `TTS_MODEL` | `gpt-4o-mini-tts` | Speech synthesis model |
 | `TTS_VOICE` | `alloy` | OpenAI voice name |
-| `CORS_ORIGINS` | *(empty)* | Comma-separated allowlist; middleware added only when non-empty |
+| `MAX_TOOL_ROUNDS` | `4` | Maximum LLM↔tool iterations per turn |
 | `MAX_HISTORY_MESSAGES` | `20` | Conversation cap (after the system prompt) |
 | `MAX_AUDIO_BYTES` | `10485760` | 10 MB server-side upload cap |
 | `MAX_AUDIO_SECONDS` | `60` | Duration guard fed by the client's `audio_duration` |
@@ -298,25 +329,23 @@ See `.env.example` for a template.
 ## Local development
 
 ```bash
-# 1. Create the env (uv preferred — this machine has no python3-venv)
-uv venv .venv
-uv pip install -p .venv -r backend/requirements.txt
+# 1. Install
+npm install
 
 # 2. Configure the OpenAI key — never commit it
-cp .env.example backend/.env        # edit backend/.env, set OPENAI_API_KEY
+cp .env.example .env        # set OPENAI_API_KEY
 
-# 3. Run (the server also serves the frontend at the root)
-cd backend
-../.venv/bin/uvicorn main:app --reload --port 8000
+# 3. Start the dev server (Next.js Turbopack, fast refresh)
+npm run dev
 ```
 
-Open http://localhost:8000
+Open http://localhost:3000
 
 Quick API smoke test without a microphone:
 
 ```bash
-curl -s http://localhost:8000/health
-curl -s -X POST http://localhost:8000/api/chat \
+curl -s http://localhost:3000/api/health
+curl -s -X POST http://localhost:3000/api/chat \
   -H 'Content-Type: application/json' \
   -d '{"session_id":"demo","message":"Hi there!"}'
 ```
@@ -326,62 +355,70 @@ curl -s -X POST http://localhost:8000/api/chat \
 ## Testing
 
 ```bash
-cd backend && ../.venv/bin/python -m pytest
+npm test          # vitest run
+npm run typecheck # tsc --noEmit
 ```
 
-**No API key or network needed** — `backend/test_api.py` monkeypatches the `ai.*` layer (STT/LLM/TTS) and `tools.search_web`, then exercises the real FastAPI app through `TestClient`.
+**No API key or network needed** — the tests `vi.mock` the `@/lib/ai` layer (STT/LLM/TTS) and stub `fetch` for web search, then exercise the real route handlers.
 
 Coverage highlights:
 
-- Contract: `/health`, `/api/chat`, `/api/voice`, `/api/reset` happy paths.
-- **Session isolation:** two sessions hold independent histories; reset clears only the target session.
-- Validation: empty message (400), empty audio (400), oversized audio (413), blank transcript → `NOTHING_HEARD`.
+- Contract: `/api/health`, `/api/chat`, `/api/voice`, `/api/reset` happy paths.
+- **Session isolation:** two sessions hold independent histories; reset clears only the target.
+- Conversation cap: `MAX_HISTORY_MESSAGES` truncation is honored.
+- Validation: blank message (400), empty audio (400), oversized audio (413), overly long audio (413), blank transcript → `NOTHING_HEARD`.
 - Failure mapping: STT exception → `502 STT_FAILED`; TTS exception → `200` with `audio: null`.
-- Tool router: query-argument plumbing and unknown-tool handling.
+- Tool router: DuckDuckGo DOM parsing, query plumbing, unknown-tool and empty-query payloads.
 
 ---
 
 ## Docker
 
 ```bash
-docker build -t voice-agent-mvp .
-docker run --rm -p 8000:8000 \
-  -e OPENAI_API_KEY=sk-… \
-  voice-agent-mvp
+docker build -t voice-agent-next .
+docker run --rm -p 3000:3000 -e OPENAI_API_KEY=sk-… voice-agent-next
 ```
 
-The image (`python:3.12-slim`) copies `backend/` and `frontend/`, installs `backend/requirements.txt`, and starts `uvicorn main:app` on port 8000. Runtime env settings still apply via `-e`.
+The multi-stage build compiles once, then copies **only** the `standalone` output (`server.js` + production static assets) into a `node:22-alpine` runtime — no source, no node_modules, no package lock.
 
 ---
 
 ## Deployment
 
-### Option A — Render (recommended, one service)
+### Option A — Vercel
 
-1. Push this repo to GitHub.
-2. Render → **New → Web Service** → pick the repo.
-3. **Runtime:** Docker. Render builds from the `Dockerfile`; set the **start command**:
-   ```
-   uvicorn main:app --host 0.0.0.0 --port $PORT
-   ```
-4. Add environment variable **`OPENAI_API_KEY`** — use a Render **Secret** (encrypted value).
-5. Deploy. Frontend and API ship together on one URL — **no CORS configuration required**.
+1. Push this repo to GitHub and import it in Vercel.
+2. Framework preset: **Next.js** (auto-detected).
+3. Add env var **`OPENAI_API_KEY`**.
+4. Deploy. Both UI and API ship on one URL.
 
-> Render injects a `$PORT`; uvicorn must bind to it, hence the start command.
+> Vercel serverless bodies are capped (~4.5 MB); long recordings are better suited to a self-hosted Node host (Option B). Keep clips short if you use Vercel.
 
-### Option B — Any container host
+### Option B — Render / Fly / any container host
 
-Same as Docker above: expose port 8000, set `OPENAI_API_KEY`. Reverse proxy / TLS are handled at the platform layer.
+```bash
+# Render: New → Web Service → Docker runtime
+# Start command:
+node server.js          # requires NEXT_FORCE_STANDALONE or the Docker image above
+```
+
+Simplest: deploy the **Docker image** (Option B.1). Or run with the Node build runtime:
+
+1. Build command: `npm ci && npm run build`
+2. Start command: `node .next/standalone/server.js`
+3. Env var: **`OPENAI_API_KEY`**
+
+The standalone server reads `PORT`/`HOSTNAME` from the environment (Render injects `PORT`).
 
 ---
 
 ## Security notes
 
-- `OPENAI_API_KEY` exists only server-side (env var / Render secret). It is never sent to the browser and never committed (see `.gitignore`).
+- `OPENAI_API_KEY` exists only server-side (env var). It is never sent to the browser and never committed (see `.gitignore`).
 - All client input is validated server-side (size, emptiness, duration) — the frontend guards are UX, not the security boundary.
 - Tool arguments are JSON-parsed and dispatched by name; unknown tools return an error string and are never executed.
-- Prompt-injection surface is **limited but present** — web-search results become tool output that the LLM reads. Current mitigations: results are isolated as a `tool`-role message and the system prompt constrains behavior. Hardening is a roadmap item.
-- Traffic should be TLS at the platform level (Render does this by default).
+- Prompt-injection surface is **limited but present** — web-search results become tool output the LLM reads. Current mitigations: results are isolated as a `tool`-role message and the system prompt constrains behavior. Hardening is a roadmap item.
+- Traffic should be TLS at the platform level (Vercel/Render do this by default).
 - There is **no authentication** on the MVP API, by design (documented in `voice_agent_mvp.md`). Do not point it at the public internet with sensitive data until auth exists.
 
 ---
@@ -399,29 +436,29 @@ The MVP is deliberately half-duplex and non-streaming. Expected UX numbers:
 | TTS → audio | ~1–2 s |
 | **End-to-end** | **≈ 5–15 s** |
 
-The UI visibly signals each stage (`Thinking…`, `Speaking…`) so slow turns don't look frozen. Cutting this latency is exactly what the WebSocket/streaming phase in `distributed_voice_agent_project.md` targets.
+The UI visibly signals each stage (`Thinking…`, `Speaking…`) so slow turns don't look frozen. Cutting this latency is exactly what the streaming phase in the [Roadmap](#roadmap) targets.
 
 ---
 
 ## Known limitations
 
-- **In-memory state:** conversations are lost on restart/redeploy; no multi-instance sharing. Acceptable for MVP, fatal for scale — Redis is the planned fix.
+- **In-memory state:** conversations are lost on restart/redeploy; no multi-instance sharing. Redis is the planned fix.
 - **No authentication or rate limiting:** single-tenant demo scope.
-- **DuckDuckGo scraping** can be rate-limited or blocked; results are best-effort.
-- **No isolation between the push-to-talk requests and server state** beyond the session map — overlapping concurrent requests to the *same* session are not serialized (the frontend enforces single-flight client-side only).
+- **DuckDuckGo Lite scraping** can be rate-limited or blocked; results are best-effort. The `runTool` interface is the swap point for a commercial search API.
+- **Concurrent requests to the same session** are not serialized server-side (the frontend enforces single-flight client-side only).
 - **Base64 audio in JSON** grows the payload ~33%; fine under 10 MB of transcription audio, wasteful for long clips.
 
 ---
 
 ## Roadmap
 
-Follows `voice_agent_mvp.md` and then `distributed_voice_agent_project.md`:
+Follows the [MVP doc](`voice_agent_mvp.md`) toward the distributed design described before this migration:
 
-1. **Streaming** — WebSocket session, streaming STT/LLM/TTS, partial transcripts.
+1. **Streaming** — WebSocket (or OpenAI Realtime), streaming STT/LLM/TTS, partial transcripts.
 2. **Persistence** — PostgreSQL (users, sessions, messages, memories) + Redis (session state, rate limiting).
 3. **Authentication** — JWT + HTTPS.
 4. **WebRTC, VAD, barge-in** — natural interruptions.
 5. **Observability** — structured logs, Prometheus/Grafana, latency metrics.
-6. **Distributed** — stateless services, Redis pub/sub, connection affinity, horizontal scaling.
+6. **Distributed** — stateless services, pub/sub, connection affinity, horizontal scaling.
 
 First make it work. Then make it fast. Then make it reliable. Then make it scalable.
