@@ -4,7 +4,7 @@ A browser-based **AI voice assistant**: talk into your microphone, see your tran
 
 > **Phase:** MVP (Milestone 0–6 of `voice_agent_mvp.md`). It works, it's tested, it's deployable.
 > The long-term architecture and roadmap described in the [Roadmap](#roadmap) section below are intentionally **not** implemented yet.
-> The original Python/FastAPI MVP is preserved under `legacy-python/` for reference.
+> This Next.js app replaces the original Python/FastAPI prototype.
 
 ---
 
@@ -183,7 +183,6 @@ Documented so the *why* survives the *what*.
 │   ├── errors.ts      AppError + error codes
 │   └── http.ts        error → NextResponse mapper
 ├── tests/             vitest suites (no API key or network needed)
-├── legacy-python/     the original FastAPI MVP (preserved)
 ├── next.config.mjs / tsconfig.json / vitest.config.ts
 ├── Dockerfile / .dockerignore
 └── .env.example

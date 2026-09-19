@@ -18,6 +18,3 @@ coverage/
 .DS_Store
 .vscode/
 .idea/
-
-# legacy python implementation
-legacy-python/
