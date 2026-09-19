@@ -1,0 +1,23 @@
+# dependencies
+node_modules/
+
+# next.js
+.next/
+out/
+*.tsbuildinfo
+
+# env / secrets
+.env
+.env.local
+.env*.local
+
+# tests
+coverage/
+
+# os / editor
+.DS_Store
+.vscode/
+.idea/
+
+# legacy python implementation
+legacy-python/
