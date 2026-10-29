@@ -5,15 +5,35 @@ import type {
 } from "openai/resources/chat/completions";
 import { config } from "./config";
 import { AppError } from "./errors";
+import { errorMessage, logWarning } from "./logger";
 import { TOOL_SCHEMAS, runTool } from "./tools";
 
-function errMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  return String(err);
+let clientInstance: OpenAI | null = null;
+
+export function ensureAiConfigured(): void {
+  if (!config.openaiApiKey.trim()) {
+    throw new AppError(
+      "CONFIG_ERROR",
+      "OPENAI_API_KEY is not configured on the server.",
+      500,
+    );
+  }
 }
 
+/**
+ * One shared client per process: reusing it preserves HTTP connection pooling,
+ * which matters for a latency-sensitive voice loop.
+ */
 function client(): OpenAI {
-  return new OpenAI({ apiKey: config.openaiApiKey });
+  ensureAiConfigured();
+  if (!clientInstance) {
+    clientInstance = new OpenAI({
+      apiKey: config.openaiApiKey,
+      timeout: config.openaiTimeoutMs,
+      maxRetries: config.openaiMaxRetries,
+    });
+  }
+  return clientInstance;
 }
 
 export async function transcribeAudio(file: File): Promise<string> {
@@ -25,7 +45,7 @@ export async function transcribeAudio(file: File): Promise<string> {
     });
     return result.trim();
   } catch (err) {
-    throw new AppError("STT_FAILED", errMessage(err), 502);
+    throw new AppError("STT_FAILED", errorMessage(err), 502);
   }
 }
 
@@ -50,6 +70,7 @@ function isFunctionCall(
 
 export async function generateResponse(messages: LlmMessage[]): Promise<string> {
   const request: LlmMessage[] = messages.slice();
+
   for (let round = 0; round <= config.maxToolRounds; round += 1) {
     let completion;
     try {
@@ -57,9 +78,10 @@ export async function generateResponse(messages: LlmMessage[]): Promise<string> 
         model: config.llmModel,
         messages: request as ChatCompletionMessageParam[],
         tools: TOOL_SCHEMAS,
+        max_tokens: config.maxReplyTokens,
       });
     } catch (err) {
-      throw new AppError("LLM_FAILED", errMessage(err), 502);
+      throw new AppError("LLM_FAILED", errorMessage(err), 502);
     }
 
     const message = completion.choices[0]?.message;
@@ -67,7 +89,7 @@ export async function generateResponse(messages: LlmMessage[]): Promise<string> 
 
     if (!toolCalls || toolCalls.length === 0) {
       const text = (message?.content ?? "").trim();
-      return text || "I didn't quite get that. Could you repeat it?";
+      return text || "I didn't quite catch that. Could you say it again?";
     }
 
     const functionCalls = toolCalls.filter(isFunctionCall);
@@ -77,40 +99,53 @@ export async function generateResponse(messages: LlmMessage[]): Promise<string> 
 
     const assistantMessage: LlmMessage = {
       role: "assistant",
-      tool_calls: functionCalls.map((tc) => ({
-        id: tc.id,
+      tool_calls: functionCalls.map((call) => ({
+        id: call.id,
         type: "function",
-        function: { name: tc.function.name, arguments: tc.function.arguments },
+        function: {
+          name: call.function.name,
+          arguments: call.function.arguments,
+        },
       })),
     };
-    if (message?.content) {
-      assistantMessage.content = message.content;
-    }
+    if (message?.content) assistantMessage.content = message.content;
     request.push(assistantMessage);
 
-    for (const tc of functionCalls) {
-      const output = await runTool(tc.function.name, tc.function.arguments || "{}");
-      request.push({
-        role: "tool",
-        tool_call_id: tc.id,
-        content: output,
-      });
+    // Run independent tool calls concurrently but keep result ordering stable.
+    const outputs = await Promise.all(
+      functionCalls.map(async (call) => ({
+        id: call.id,
+        output: await runTool(call.function.name, call.function.arguments || "{}"),
+      })),
+    );
+    for (const { id, output } of outputs) {
+      request.push({ role: "tool", tool_call_id: id, content: output });
     }
   }
+
   throw new AppError("LLM_FAILED", "Tool loop exceeded maximum iterations", 502);
 }
 
+const TTS_MAX_INPUT_CHARS = 4_000;
+
 export async function synthesizeSpeech(text: string): Promise<string> {
+  const input =
+    text.length > TTS_MAX_INPUT_CHARS
+      ? `${text.slice(0, TTS_MAX_INPUT_CHARS - 3)}...`
+      : text;
+
   try {
     const response = await client().audio.speech.create({
       model: config.ttsModel,
       voice: config.ttsVoice,
       response_format: "mp3",
-      input: text,
+      input,
     });
     const audio = await response.arrayBuffer();
     return Buffer.from(audio).toString("base64");
   } catch (err) {
-    throw new AppError("TTS_FAILED", errMessage(err), 502);
+    // TTS is best-effort: callers degrade to text-only replies.
+    logWarning("tts.failed", { message: errorMessage(err) });
+    throw new AppError("TTS_FAILED", errorMessage(err), 502);
   }
 }

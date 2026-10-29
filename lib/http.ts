@@ -1,16 +1,56 @@
+import { randomUUID } from "node:crypto";
 import { NextResponse } from "next/server";
-import { AppError } from "./errors";
+import { config } from "./config";
+import { AppError, type ErrorCode } from "./errors";
+import { errorMessage, logError } from "./logger";
 
-export function toErrorResponse(err: unknown): NextResponse {
+const GENERIC_SERVER_MESSAGE =
+  "The service hit an unexpected error. Please try again in a moment.";
+
+export function toErrorResponse(
+  err: unknown,
+  requestId: string = randomUUID(),
+): NextResponse {
+  let code: ErrorCode = "INTERNAL";
+  let status = 500;
+  let message = GENERIC_SERVER_MESSAGE;
+
   if (err instanceof AppError) {
-    return NextResponse.json(
-      { detail: { error_code: err.code, message: err.message } },
-      { status: err.status },
-    );
+    code = err.code;
+    status = err.status;
+    message =
+      config.isProduction && status >= 500 ? GENERIC_SERVER_MESSAGE : err.message;
   }
-  const message = err instanceof Error ? err.message : String(err);
+
+  logError("request.failed", {
+    requestId,
+    code,
+    status,
+    message: err instanceof AppError ? err.message : errorMessage(err),
+  });
+
   return NextResponse.json(
-    { detail: { error_code: "INTERNAL", message } },
-    { status: 500 },
+    { detail: { error_code: code, message, request_id: requestId } },
+    {
+      status,
+      headers: {
+        "cache-control": "no-store",
+        "x-request-id": requestId,
+      },
+    },
   );
+}
+
+export function jsonOk(
+  data: unknown,
+  requestId: string,
+  status = 200,
+): NextResponse {
+  return NextResponse.json(data, {
+    status,
+    headers: {
+      "cache-control": "no-store",
+      "x-request-id": requestId,
+    },
+  });
 }

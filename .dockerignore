@@ -1,6 +1,12 @@
 node_modules
 .next
 .git
+.github
 .npmrc
+.env
+.env.*
 .DS_Store
+coverage
 tests
+README.md
+voice_agent_mvp.md

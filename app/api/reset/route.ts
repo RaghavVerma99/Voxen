@@ -1,20 +1,25 @@
-import { NextRequest, NextResponse } from "next/server";
+import { randomUUID } from "node:crypto";
+import { NextRequest } from "next/server";
 import { reset } from "@/lib/conversation";
-import { AppError } from "@/lib/errors";
-import { toErrorResponse } from "@/lib/http";
+import { guardRequest } from "@/lib/guard";
+import { jsonOk, toErrorResponse } from "@/lib/http";
+import { requireSessionId } from "@/lib/validate";
+
+interface ResetBody {
+  session_id?: unknown;
+}
 
 export async function POST(request: NextRequest) {
+  const requestId = randomUUID();
+
   try {
-    const body = (await request.json().catch(() => null)) as {
-      session_id?: string;
-    } | null;
-    const sessionId = body?.session_id?.trim();
-    if (!sessionId) {
-      throw new AppError("MISSING_SESSION", "session_id is required");
-    }
+    guardRequest(request, "reset");
+    const body = (await request.json().catch(() => null)) as ResetBody | null;
+    const sessionId = requireSessionId(body?.session_id);
+
     reset(sessionId);
-    return NextResponse.json({ status: "ok", session_id: sessionId });
+    return jsonOk({ status: "ok", session_id: sessionId }, requestId);
   } catch (err) {
-    return toErrorResponse(err);
+    return toErrorResponse(err, requestId);
   }
 }

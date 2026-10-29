@@ -1,13 +1,19 @@
 {
-  "name": "voice-agent-next",
-  "version": "0.1.0",
+  "name": "voxen",
+  "version": "1.0.0",
   "private": true,
+  "description": "Voxen — a browser-based AI voice agent with web search and spoken answers.",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node scripts/start.mjs",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "check": "npm run typecheck && npm test"
   },
   "dependencies": {
     "cheerio": "^1.2.0",

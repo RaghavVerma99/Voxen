@@ -1,21 +1,33 @@
 import { randomUUID } from "node:crypto";
-import { NextRequest, NextResponse } from "next/server";
-import { generateResponse, synthesizeSpeech, transcribeAudio } from "@/lib/ai";
+import { NextRequest } from "next/server";
+import { ensureAiConfigured, generateResponse, synthesizeSpeech, transcribeAudio } from "@/lib/ai";
 import { config } from "@/lib/config";
-import { addMessage, getConversation, getHistory } from "@/lib/conversation";
+import {
+  appendTurn,
+  buildRequestMessages,
+  getHistory,
+} from "@/lib/conversation";
 import { AppError } from "@/lib/errors";
-import { toErrorResponse } from "@/lib/http";
+import { consumeBudget, guardRequest } from "@/lib/guard";
+import { jsonOk, toErrorResponse } from "@/lib/http";
+import { errorMessage, logEvent, logWarning } from "@/lib/logger";
+import { resolveSessionId } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
+  const requestId = randomUUID();
+  const startedAt = Date.now();
+
   try {
+    guardRequest(request, "voice");
+    ensureAiConfigured();
+
     const formData = await request.formData();
     const audio = formData.get("audio");
-    const sessionId = formData.get("session_id")?.toString().trim() || randomUUID();
-    const durationRaw = formData.get("audio_duration")?.toString();
-    const duration = durationRaw ? Number(durationRaw) : Number.NaN;
+    const sessionId = resolveSessionId(formData.get("session_id"));
+    const duration = Number(formData.get("audio_duration"));
 
     if (!(audio instanceof File) || audio.size === 0) {
-      throw new AppError("EMPTY_AUDIO", "No audio received");
+      throw new AppError("EMPTY_AUDIO", "No audio received", 400);
     }
     if (audio.size > config.maxAudioBytes) {
       throw new AppError(
@@ -24,7 +36,7 @@ export async function POST(request: NextRequest) {
         413,
       );
     }
-    if (!Number.isNaN(duration) && duration > config.maxAudioSeconds) {
+    if (Number.isFinite(duration) && duration > config.maxAudioSeconds) {
       throw new AppError(
         "AUDIO_TOO_LONG",
         `Audio exceeds ${config.maxAudioSeconds}s limit`,
@@ -32,30 +44,47 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    const transcript = await transcribeAudio(audio);
-    if (!transcript.trim()) {
-      throw new AppError("NOTHING_HEARD", "No speech detected in audio");
+    consumeBudget("voice");
+    const transcript = (await transcribeAudio(audio)).trim();
+    if (!transcript) {
+      throw new AppError("NOTHING_HEARD", "No speech detected in audio", 400);
     }
 
-    addMessage(sessionId, "user", transcript);
-    const reply = await generateResponse(getConversation(sessionId));
-    addMessage(sessionId, "assistant", reply);
+    const reply = await generateResponse(
+      buildRequestMessages(sessionId, transcript),
+    );
+    appendTurn(sessionId, transcript, reply);
 
     let audioB64: string | null = null;
     try {
       audioB64 = await synthesizeSpeech(reply);
-    } catch {
-      audioB64 = null;
+    } catch (err) {
+      logWarning("voice.tts_unavailable", {
+        requestId,
+        message: errorMessage(err),
+      });
     }
 
-    return NextResponse.json({
-      session_id: sessionId,
-      transcript,
-      reply,
-      audio: audioB64,
-      history: getHistory(sessionId),
+    logEvent("voice.completed", {
+      requestId,
+      sessionId,
+      durationMs: Date.now() - startedAt,
+      audioBytes: audio.size,
+      transcriptChars: transcript.length,
+      spoken: audioB64 !== null,
     });
+
+    return jsonOk(
+      {
+        session_id: sessionId,
+        transcript,
+        reply,
+        audio: audioB64,
+        history: getHistory(sessionId),
+      },
+      requestId,
+    );
   } catch (err) {
-    return toErrorResponse(err);
+    return toErrorResponse(err, requestId);
   }
 }

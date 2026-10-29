@@ -1,5 +1,10 @@
 # Voice Agent — MVP
 
+> **Historical document.** This is the original milestone spec, written around a
+> Python/FastAPI prototype. The implementation now lives in the Next.js app
+> described in `README.md`. Kept for context on the original scope and
+> non-goals.
+
 ## Goal
 
 Build a simple, deployable AI voice agent that lets a user:
