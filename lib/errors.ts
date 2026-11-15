@@ -4,6 +4,8 @@ export type ErrorCode =
   | "ACCESS_DENIED"
   | "RATE_LIMITED"
   | "BUDGET_EXHAUSTED"
+  | "INVALID_BODY"
+  | "PAYLOAD_TOO_LARGE"
   | "EMPTY_MESSAGE"
   | "MESSAGE_TOO_LONG"
   | "MISSING_SESSION"
@@ -16,14 +18,23 @@ export type ErrorCode =
   | "LLM_FAILED"
   | "TTS_FAILED";
 
+export type ErrorHeaders = Record<string, string>;
+
 export class AppError extends Error {
   readonly code: ErrorCode;
   readonly status: number;
+  readonly headers?: ErrorHeaders;
 
-  constructor(code: ErrorCode, message: string, status = 400) {
+  constructor(
+    code: ErrorCode,
+    message: string,
+    status = 400,
+    headers?: ErrorHeaders,
+  ) {
     super(message);
     this.name = "AppError";
     this.code = code;
     this.status = status;
+    this.headers = headers;
   }
 }

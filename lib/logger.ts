@@ -1,4 +1,14 @@
+import { createHash } from "node:crypto";
+
 type LogFields = Record<string, unknown>;
+
+/**
+ * Session ids are bearer tokens for their conversation. Log a stable hash
+ * instead of the real value so log drains cannot be used to read transcripts.
+ */
+export function redactSessionId(sessionId: string): string {
+  return `sha256:${createHash("sha256").update(sessionId).digest("hex").slice(0, 12)}`;
+}
 
 function emit(level: "info" | "warn" | "error", event: string, fields: LogFields): void {
   // Keep test output clean; production logs are structured JSON for log drains.
