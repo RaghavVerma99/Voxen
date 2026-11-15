@@ -13,8 +13,10 @@ vi.mock("@/lib/ai", () => ({
   synthesizeSpeech: vi.fn(),
 }));
 
-import { GET as getHealth } from "@/app/api/health/route";
 import { POST as postChat } from "@/app/api/chat/route";
+import { GET as getHistoryRoute } from "@/app/api/history/route";
+import { GET as getHealth } from "@/app/api/health/route";
+import { GET as getReady } from "@/app/api/ready/route";
 import { POST as postReset } from "@/app/api/reset/route";
 import { POST as postVoice } from "@/app/api/voice/route";
 
@@ -41,6 +43,14 @@ function chatRequest(body: unknown, code?: string): NextRequest {
   });
 }
 
+function rawChatRequest(body: string): NextRequest {
+  return new NextRequest("http://localhost/api/chat", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+}
+
 function resetRequest(body: unknown, code?: string): NextRequest {
   return new NextRequest("http://localhost/api/reset", {
     method: "POST",
@@ -61,6 +71,7 @@ function audioForm(options?: {
   sessionId?: string;
   bytes?: number;
   duration?: string;
+  speak?: boolean;
 }): FormData {
   const size = options?.bytes ?? 64;
   const form = new FormData();
@@ -71,6 +82,9 @@ function audioForm(options?: {
   form.append("session_id", options?.sessionId ?? nextSession());
   if (options?.duration !== undefined) {
     form.append("audio_duration", options.duration);
+  }
+  if (options?.speak !== undefined) {
+    form.append("speak", String(options.speak));
   }
   return form;
 }
@@ -91,7 +105,7 @@ beforeEach(() => {
 });
 
 describe("health", () => {
-  it("reports status, version and configuration", async () => {
+  it("reports status and version without exposing internals", async () => {
     const response = await getHealth(
       new NextRequest("http://localhost/api/health"),
     );
@@ -101,7 +115,28 @@ describe("health", () => {
     expect(body.status).toBe("ok");
     expect(body.name).toBe("Voxen");
     expect(body.access_required).toBe(false);
-    expect(body.checks).toBeDefined();
+    expect(body.checks).toBeUndefined();
+    expect(body.budget).toBeUndefined();
+    expect(body.sessions).toBeUndefined();
+  });
+
+  it("exposes configuration and budget on the detail view", async () => {
+    const originalKey = config.openaiApiKey;
+    config.openaiApiKey = "test-key";
+
+    try {
+      const response = await getHealth(
+        new NextRequest("http://localhost/api/health?detail=1"),
+      );
+      const body = await bodyOf(response);
+
+      expect(response.status).toBe(200);
+      expect(body.checks).toMatchObject({ ai: "configured" });
+      expect(body.budget).toMatchObject({ limit: config.dailyRequestBudget });
+      expect(typeof body.sessions).toBe("number");
+    } finally {
+      config.openaiApiKey = originalKey;
+    }
   });
 
   it("verifies an access code when asked", async () => {
@@ -118,6 +153,37 @@ describe("health", () => {
       }),
     );
     expect(allowed.status).toBe(200);
+  });
+});
+
+describe("ready", () => {
+  it("fails readiness when the AI provider is not configured", async () => {
+    const originalKey = config.openaiApiKey;
+    config.openaiApiKey = "";
+
+    try {
+      const response = await getReady();
+      expect(response.status).toBe(503);
+      expect(await bodyOf(response)).toMatchObject({
+        status: "not_ready",
+        reason: "ai_not_configured",
+      });
+    } finally {
+      config.openaiApiKey = originalKey;
+    }
+  });
+
+  it("reports readiness when the AI provider is configured", async () => {
+    const originalKey = config.openaiApiKey;
+    config.openaiApiKey = "test-key";
+
+    try {
+      const response = await getReady();
+      expect(response.status).toBe(200);
+      expect(await bodyOf(response)).toEqual({ status: "ready" });
+    } finally {
+      config.openaiApiKey = originalKey;
+    }
   });
 });
 
@@ -226,6 +292,79 @@ describe("chat", () => {
       config.dailyRequestBudget = original;
     }
   });
+
+  it("rejects request bodies above the configured byte limit", async () => {
+    const original = config.maxChatRequestBytes;
+    config.maxChatRequestBytes = 32;
+
+    try {
+      const response = await postChat(
+        chatRequest({ session_id: nextSession(), message: "x".repeat(100) }),
+      );
+      expect(response.status).toBe(413);
+      expect(detailOf(await bodyOf(response)).error_code).toBe(
+        "PAYLOAD_TOO_LARGE",
+      );
+      expect(mockGenerate).not.toHaveBeenCalled();
+    } finally {
+      config.maxChatRequestBytes = original;
+    }
+  });
+
+  it("rejects malformed JSON", async () => {
+    const response = await postChat(rawChatRequest("{not-json"));
+    expect(response.status).toBe(400);
+    expect(detailOf(await bodyOf(response)).error_code).toBe("INVALID_BODY");
+  });
+});
+
+describe("history", () => {
+  it("returns the stored history for a session", async () => {
+    const sessionId = nextSession();
+    mockGenerate.mockResolvedValue("stored reply");
+    await postChat(chatRequest({ session_id: sessionId, message: "remember" }));
+
+    const response = await getHistoryRoute(
+      new NextRequest(
+        `http://localhost/api/history?session_id=${sessionId}`,
+      ),
+    );
+    const body = await bodyOf(response);
+
+    expect(response.status).toBe(200);
+    expect(body.history).toEqual([
+      { role: "user", content: "remember" },
+      { role: "assistant", content: "stored reply" },
+    ]);
+  });
+
+  it("accepts the session id in a header", async () => {
+    const sessionId = nextSession();
+    mockGenerate.mockResolvedValue("header reply");
+    await postChat(chatRequest({ session_id: sessionId, message: "again" }));
+
+    const response = await getHistoryRoute(
+      new NextRequest("http://localhost/api/history", {
+        headers: { "x-session-id": sessionId },
+      }),
+    );
+    const body = await bodyOf(response);
+
+    expect(response.status).toBe(200);
+    expect(body.session_id).toBe(sessionId);
+    expect(body.history).toEqual([
+      { role: "user", content: "again" },
+      { role: "assistant", content: "header reply" },
+    ]);
+  });
+
+  it("requires a valid session id", async () => {
+    const response = await getHistoryRoute(
+      new NextRequest("http://localhost/api/history"),
+    );
+    expect(response.status).toBe(400);
+    expect(detailOf(await bodyOf(response)).error_code).toBe("MISSING_SESSION");
+  });
 });
 
 describe("reset", () => {
@@ -265,6 +404,20 @@ describe("voice", () => {
     expect(body.history).toHaveLength(2);
   });
 
+  it("skips speech when speak is false", async () => {
+    mockTranscribe.mockResolvedValue("hello");
+    mockGenerate.mockResolvedValue("hi there");
+
+    const response = await postVoice(
+      voiceRequest(audioForm({ speak: false })),
+    );
+    const body = await bodyOf(response);
+
+    expect(response.status).toBe(200);
+    expect(body.audio).toBeNull();
+    expect(mockSynthesize).not.toHaveBeenCalled();
+  });
+
   it("degrades to text when TTS fails", async () => {
     mockTranscribe.mockResolvedValue("hello");
     mockGenerate.mockResolvedValue("hi there");
@@ -285,10 +438,20 @@ describe("voice", () => {
 
   it("rejects oversized audio", async () => {
     const response = await postVoice(
-      voiceRequest(audioForm({ bytes: 11 * 1024 * 1024 })),
+      voiceRequest(audioForm({ bytes: 4.2 * 1024 * 1024 })),
     );
     expect(response.status).toBe(413);
     expect(detailOf(await bodyOf(response)).error_code).toBe("AUDIO_TOO_LARGE");
+  });
+
+  it("rejects a request body above the transport limit", async () => {
+    const response = await postVoice(
+      voiceRequest(audioForm({ bytes: 12 * 1024 * 1024 })),
+    );
+    expect(response.status).toBe(413);
+    expect(detailOf(await bodyOf(response)).error_code).toBe(
+      "PAYLOAD_TOO_LARGE",
+    );
   });
 
   it("rejects overly long audio", async () => {

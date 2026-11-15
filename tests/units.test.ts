@@ -1,7 +1,11 @@
+import { NextRequest } from "next/server";
 import { describe, expect, it } from "vitest";
 import { addMessage, appendTurn, getHistory, reset } from "@/lib/conversation";
 import { config } from "@/lib/config";
+import { AppError } from "@/lib/errors";
+import { clientAddress, guardRequest } from "@/lib/guard";
 import { rateLimit } from "@/lib/ratelimit";
+import { SentenceChunker } from "@/lib/sse";
 import { searchWeb, runTool } from "@/lib/tools";
 import { requireSessionId, resolveSessionId } from "@/lib/validate";
 
@@ -93,6 +97,109 @@ describe("rate limiting", () => {
     } finally {
       config.rateLimitRequests = original;
     }
+  });
+});
+
+describe("access guard", () => {
+  it("counts failed access attempts before rejecting them", () => {
+    const originalCode = config.accessCode;
+    const originalLimit = config.rateLimitRequests;
+    const route = uniqueId("guard");
+    config.accessCode = "secret";
+    config.rateLimitRequests = 1;
+
+    try {
+      const request = () =>
+        new NextRequest("http://localhost/api/chat", {
+          headers: { "x-access-code": "wrong" },
+        });
+
+      expect(() => guardRequest(request(), route)).toThrow(
+        expect.objectContaining({ code: "ACCESS_DENIED" }),
+      );
+      expect(() => guardRequest(request(), route)).toThrow(
+        expect.objectContaining({ code: "RATE_LIMITED" }),
+      );
+    } finally {
+      config.accessCode = originalCode;
+      config.rateLimitRequests = originalLimit;
+    }
+  });
+
+  it("includes rate limit headers on access denials", () => {
+    const originalCode = config.accessCode;
+    const originalLimit = config.rateLimitRequests;
+    config.accessCode = "secret";
+    config.rateLimitRequests = 10;
+
+    try {
+      try {
+        guardRequest(
+          new NextRequest("http://localhost/api/chat"),
+          uniqueId("guard-headers"),
+        );
+        expect.unreachable("guardRequest should reject a missing code");
+      } catch (err) {
+        expect(err).toBeInstanceOf(AppError);
+        expect((err as AppError).headers).toMatchObject({
+          "RateLimit-Limit": "10",
+        });
+      }
+    } finally {
+      config.accessCode = originalCode;
+      config.rateLimitRequests = originalLimit;
+    }
+  });
+
+  it("ignores forwarded headers unless a proxy is trusted", () => {
+    const originalHops = config.trustProxyHops;
+    const headers = { "x-forwarded-for": "203.0.113.9, 10.0.0.1" };
+
+    try {
+      config.trustProxyHops = 0;
+      expect(
+        clientAddress(new NextRequest("http://localhost", { headers })),
+      ).toBe("local");
+
+      config.trustProxyHops = 1;
+      expect(
+        clientAddress(new NextRequest("http://localhost", { headers })),
+      ).toBe("10.0.0.1");
+    } finally {
+      config.trustProxyHops = originalHops;
+    }
+  });
+});
+
+describe("sentence chunking", () => {
+  it("splits complete sentences as they arrive", () => {
+    const chunker = new SentenceChunker();
+    expect(chunker.push("First sentence. ")).toEqual(["First sentence."]);
+    expect(chunker.push("Second one! ")).toEqual(["Second one!"]);
+    expect(chunker.flush()).toEqual([]);
+  });
+
+  it("keeps an incomplete tail buffered until flush", () => {
+    const chunker = new SentenceChunker();
+    expect(chunker.push("No punctuation yet")).toEqual([]);
+    expect(chunker.push(" and still going")).toEqual([]);
+    expect(chunker.flush()).toEqual(["No punctuation yet and still going"]);
+  });
+
+  it("keeps closing quotes with their sentence", () => {
+    const chunker = new SentenceChunker();
+    expect(chunker.push('He said "hello." ')).toEqual(['He said "hello."']);
+  });
+
+  it("splits long unpunctuated text into speakable chunks", () => {
+    const chunker = new SentenceChunker();
+    const chunks = chunker.push("word ".repeat(120));
+    const flushed = chunker.flush();
+    const all = [...chunks, ...flushed];
+
+    expect(all.length).toBeGreaterThan(1);
+    for (const chunk of all) expect(chunk.length).toBeLessThanOrEqual(260);
+    expect(all.join(" ")).toContain("word");
   });
 });
 
