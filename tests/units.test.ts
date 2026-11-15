@@ -151,6 +151,47 @@ describe("access guard", () => {
     }
   });
 
+  it("fails closed in production when the access gate is missing or weak", () => {
+    const originalProduction = config.isProduction;
+    const originalCode = config.accessCode;
+    const originalRequired = config.requireAccessCodeInProduction;
+
+    try {
+      config.isProduction = true;
+      config.requireAccessCodeInProduction = true;
+      config.accessCode = "";
+
+      expect(() =>
+        guardRequest(
+          new NextRequest("http://localhost/api/chat"),
+          uniqueId("prod-guard"),
+        ),
+      ).toThrow(expect.objectContaining({ code: "CONFIG_ERROR", status: 503 }));
+
+      config.accessCode = "too-short";
+      expect(() =>
+        guardRequest(
+          new NextRequest("http://localhost/api/chat"),
+          uniqueId("short-guard"),
+        ),
+      ).toThrow(expect.objectContaining({ code: "CONFIG_ERROR" }));
+
+      config.accessCode = "x".repeat(config.minAccessCodeLength);
+      expect(() =>
+        guardRequest(
+          new NextRequest("http://localhost/api/chat", {
+            headers: { "x-access-code": config.accessCode },
+          }),
+          uniqueId("valid-guard"),
+        ),
+      ).not.toThrow();
+    } finally {
+      config.isProduction = originalProduction;
+      config.accessCode = originalCode;
+      config.requireAccessCodeInProduction = originalRequired;
+    }
+  });
+
   it("ignores forwarded headers unless a proxy is trusted", () => {
     const originalHops = config.trustProxyHops;
     const headers = { "x-forwarded-for": "203.0.113.9, 10.0.0.1" };

@@ -185,6 +185,28 @@ describe("ready", () => {
       config.openaiApiKey = originalKey;
     }
   });
+
+  it("fails readiness in production without a usable access gate", async () => {
+    const originalKey = config.openaiApiKey;
+    const originalProduction = config.isProduction;
+    const originalCode = config.accessCode;
+    config.openaiApiKey = "test-key";
+    config.isProduction = true;
+    config.accessCode = "";
+
+    try {
+      const response = await getReady();
+      expect(response.status).toBe(503);
+      expect(await bodyOf(response)).toMatchObject({
+        status: "not_ready",
+        reason: "access_code_not_configured",
+      });
+    } finally {
+      config.openaiApiKey = originalKey;
+      config.isProduction = originalProduction;
+      config.accessCode = originalCode;
+    }
+  });
 });
 
 describe("chat", () => {
@@ -256,6 +278,25 @@ describe("chat", () => {
 
     expect(response.status).toBe(200);
     expect(body.audio).toBe("QUJD");
+  });
+
+  it("refuses paid traffic in production without an access gate", async () => {
+    const originalProduction = config.isProduction;
+    const originalCode = config.accessCode;
+    config.isProduction = true;
+    config.accessCode = "";
+
+    try {
+      const response = await postChat(
+        chatRequest({ session_id: nextSession(), message: "hi" }),
+      );
+      expect(response.status).toBe(503);
+      expect(detailOf(await bodyOf(response)).error_code).toBe("CONFIG_ERROR");
+      expect(mockGenerate).not.toHaveBeenCalled();
+    } finally {
+      config.isProduction = originalProduction;
+      config.accessCode = originalCode;
+    }
   });
 
   it("enforces the access code when configured", async () => {
