@@ -63,6 +63,16 @@ export function consumeDailyBudget(): boolean {
   return true;
 }
 
+/**
+ * Returns one reserved request to the budget. Call this when a turn fails
+ * before producing a useful result (for example, STT rejects the audio).
+ */
+export function refundDailyBudget(): boolean {
+  if (budgetUsed <= 0) return false;
+  budgetUsed -= 1;
+  return true;
+}
+
 export function budgetSnapshot(): { date: string; used: number; limit: number } {
   return {
     date: budgetDate || new Date().toISOString().slice(0, 10),

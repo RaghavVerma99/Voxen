@@ -15,6 +15,7 @@ import { POST as postVoiceStream } from "@/app/api/voice/stream/route";
 import { config } from "@/lib/config";
 import { getHistory } from "@/lib/conversation";
 import { AppError } from "@/lib/errors";
+import { budgetSnapshot } from "@/lib/ratelimit";
 import type { StreamHandlers } from "@/lib/ai";
 
 const mockTranscribe = vi.mocked(provider.transcribeAudio);
@@ -149,6 +150,7 @@ describe("chat stream", () => {
 
   it("emits an error event and keeps history clean when the model fails", async () => {
     const sessionId = nextSession();
+    const before = budgetSnapshot().used;
     mockStream.mockRejectedValue(
       new AppError("LLM_FAILED", "upstream down", 502),
     );
@@ -165,6 +167,7 @@ describe("chat stream", () => {
       message: "upstream down",
     });
     expect(getHistory(sessionId)).toEqual([]);
+    expect(budgetSnapshot().used).toBe(before);
   });
 
   it("rejects invalid requests before starting the stream", async () => {
@@ -207,6 +210,7 @@ describe("voice stream", () => {
   });
 
   it("returns a JSON error when transcription finds no speech", async () => {
+    const before = budgetSnapshot().used;
     mockTranscribe.mockResolvedValue("   ");
 
     const response = await postVoiceStream(
@@ -217,5 +221,29 @@ describe("voice stream", () => {
     const body = (await response.json()) as { detail: { error_code: string } };
     expect(body.detail.error_code).toBe("NOTHING_HEARD");
     expect(mockStream).not.toHaveBeenCalled();
+    expect(budgetSnapshot().used).toBe(before);
+  });
+
+  it("requires audio_duration before reserving budget or calling STT", async () => {
+    const before = budgetSnapshot().used;
+    const form = new FormData();
+    form.append(
+      "audio",
+      new File([new Uint8Array(64)], "rec.webm", { type: "audio/webm" }),
+    );
+    form.append("session_id", nextSession());
+
+    const response = await postVoiceStream(
+      new NextRequest("http://localhost/api/voice/stream", {
+        method: "POST",
+        body: form,
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    const body = (await response.json()) as { detail: { error_code: string } };
+    expect(body.detail.error_code).toBe("INVALID_AUDIO_DURATION");
+    expect(mockTranscribe).not.toHaveBeenCalled();
+    expect(budgetSnapshot().used).toBe(before);
   });
 });

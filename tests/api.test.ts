@@ -5,6 +5,7 @@ import { generateResponse, synthesizeSpeech, transcribeAudio } from "@/lib/ai";
 import { config } from "@/lib/config";
 import { getHistory } from "@/lib/conversation";
 import { AppError } from "@/lib/errors";
+import { budgetSnapshot } from "@/lib/ratelimit";
 
 vi.mock("@/lib/ai", () => ({
   ensureAiConfigured: vi.fn(),
@@ -71,6 +72,7 @@ function audioForm(options?: {
   sessionId?: string;
   bytes?: number;
   duration?: string;
+  omitDuration?: boolean;
   speak?: boolean;
 }): FormData {
   const size = options?.bytes ?? 64;
@@ -80,8 +82,8 @@ function audioForm(options?: {
     new File([new Uint8Array(size)], "rec.webm", { type: "audio/webm" }),
   );
   form.append("session_id", options?.sessionId ?? nextSession());
-  if (options?.duration !== undefined) {
-    form.append("audio_duration", options.duration);
+  if (!options?.omitDuration) {
+    form.append("audio_duration", options?.duration ?? "1.5");
   }
   if (options?.speak !== undefined) {
     form.append("speak", String(options.speak));
@@ -257,6 +259,7 @@ describe("chat", () => {
 
   it("does not persist an orphan user turn when the model fails", async () => {
     const sessionId = nextSession();
+    const before = budgetSnapshot().used;
     mockGenerate.mockRejectedValue(new AppError("LLM_FAILED", "down", 502));
 
     const response = await postChat(
@@ -265,6 +268,7 @@ describe("chat", () => {
 
     expect(response.status).toBe(502);
     expect(getHistory(sessionId)).toEqual([]);
+    expect(budgetSnapshot().used).toBe(before);
   });
 
   it("speaks the reply when asked", async () => {
@@ -503,19 +507,37 @@ describe("voice", () => {
     expect(detailOf(await bodyOf(response)).error_code).toBe("AUDIO_TOO_LONG");
   });
 
+  it("requires a recording duration", async () => {
+    const before = budgetSnapshot().used;
+    const response = await postVoice(
+      voiceRequest(audioForm({ omitDuration: true })),
+    );
+
+    expect(response.status).toBe(400);
+    expect(detailOf(await bodyOf(response)).error_code).toBe(
+      "INVALID_AUDIO_DURATION",
+    );
+    expect(mockTranscribe).not.toHaveBeenCalled();
+    expect(budgetSnapshot().used).toBe(before);
+  });
+
   it("rejects audio with no detected speech", async () => {
+    const before = budgetSnapshot().used;
     mockTranscribe.mockResolvedValue("   ");
     const response = await postVoice(voiceRequest(audioForm()));
     expect(response.status).toBe(400);
     expect(detailOf(await bodyOf(response)).error_code).toBe("NOTHING_HEARD");
+    expect(budgetSnapshot().used).toBe(before);
   });
 
-  it("maps STT failures to 502", async () => {
+  it("maps STT failures to 502 and releases the budget", async () => {
+    const before = budgetSnapshot().used;
     mockTranscribe.mockRejectedValue(
       new AppError("STT_FAILED", "bad key", 502),
     );
     const response = await postVoice(voiceRequest(audioForm()));
     expect(response.status).toBe(502);
     expect(detailOf(await bodyOf(response)).error_code).toBe("STT_FAILED");
+    expect(budgetSnapshot().used).toBe(before);
   });
 });
