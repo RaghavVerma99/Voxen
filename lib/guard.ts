@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
 import type { NextRequest } from "next/server";
-import { config } from "./config";
+import { config, isProductionAccessMisconfigured } from "./config";
 import { AppError } from "./errors";
 import { logEvent } from "./logger";
 import {
@@ -64,7 +64,8 @@ export function rateLimitHeaders(
 /**
  * Applies per-client rate limiting and access control. Rate limiting runs
  * first so denied access-code attempts are still counted and cannot be
- * brute-forced without a bound.
+ * brute-forced without a bound. In production, a missing or too-short access
+ * code fails closed before any paid work can start.
  */
 export function guardRequest(
   request: NextRequest,
@@ -81,6 +82,16 @@ export function guardRequest(
       `Too many requests. Try again in ${result.retryAfterSeconds}s.`,
       429,
       rateLimitHeaders(result, true),
+    );
+  }
+
+  if (isProductionAccessMisconfigured()) {
+    logEvent("request.access_misconfigured", { route });
+    throw new AppError(
+      "CONFIG_ERROR",
+      `ACCESS_CODE must be set to at least ${config.minAccessCodeLength} characters in production.`,
+      503,
+      rateLimitHeaders(result),
     );
   }
 

@@ -25,6 +25,7 @@ function defaultProxyHops(): number {
 }
 
 const nodeEnv = process.env.NODE_ENV ?? "development";
+const accessCode = (process.env.ACCESS_CODE ?? "").trim();
 
 export const config = {
   appName: "Voxen",
@@ -69,8 +70,12 @@ export const config = {
   rateLimitWindowMs: toNumber(process.env.RATE_LIMIT_WINDOW_MS, 60_000),
   dailyRequestBudget: toNumber(process.env.DAILY_REQUEST_BUDGET, 1_000),
 
-  // Optional shared access code for private previews
-  accessCode: process.env.ACCESS_CODE ?? "",
+  // Shared access code. Production refuses paid traffic unless this is a
+  // long enough secret, so a misconfigured deploy cannot expose the API.
+  accessCode,
+  minAccessCodeLength: toNumber(process.env.MIN_ACCESS_CODE_LENGTH, 16),
+  requireAccessCodeInProduction:
+    process.env.REQUIRE_ACCESS_CODE !== "false",
 
   // Proxy trust: 0 = ignore forwarded headers (direct deployments)
   trustProxyHops: toNumber(
@@ -80,3 +85,16 @@ export const config = {
 };
 
 export const isAiConfigured = (): boolean => config.openaiApiKey.trim().length > 0;
+
+/** True when the configured access code meets the minimum length. */
+export const isAccessGateConfigured = (): boolean =>
+  config.accessCode.length >= config.minAccessCodeLength;
+
+/**
+ * A production deployment without a real access gate is unsafe: every paid
+ * endpoint is public. Routes fail closed instead of silently accepting traffic.
+ */
+export const isProductionAccessMisconfigured = (): boolean =>
+  config.isProduction &&
+  config.requireAccessCodeInProduction &&
+  !isAccessGateConfigured();
