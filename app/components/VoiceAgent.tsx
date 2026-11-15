@@ -3,33 +3,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import AccessGate from "./AccessGate";
 import {
-  AlertIcon,
-  CloseIcon,
   MicIcon,
   PlayIcon,
   RefreshIcon,
   SendIcon,
   SparkIcon,
   StopIcon,
-  UserIcon,
   WaveIcon,
 } from "./Icons";
+import {
+  MessageRow,
+  TypingRow,
+  WaveBars,
+  type Entry,
+} from "./voice-agent/Messages";
+import { ApiError, consumeSse, errorFromResponse } from "./voice-agent/stream";
+import { useAudioQueue } from "./voice-agent/useAudioQueue";
+import { useRecorder } from "./voice-agent/useRecorder";
 
 type Status = "idle" | "recording" | "thinking" | "speaking";
-type EntryRole = "user" | "agent" | "error";
 
-interface Entry {
-  id: string;
-  role: EntryRole;
-  text: string;
-  at: number;
-}
-
-interface ReplyPayload {
-  transcript?: string;
-  reply?: string;
-  audio?: string | null;
-  detail?: { message?: string };
+interface HistoryPayload {
+  history?: Array<{ role: string; content: string }>;
 }
 
 const SESSION_KEY = "voxen.session_id";
@@ -55,7 +50,6 @@ function randomId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
   }
-  // Fallback for non-secure contexts (e.g. testing over a LAN IP).
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
     const random = (Math.random() * 16) | 0;
     const value = char === "x" ? random : (random & 0x3) | 0x8;
@@ -78,97 +72,20 @@ function formatTime(seconds: number): string {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
 }
 
-function pickMimeType(): string | null {
-  if (typeof MediaRecorder === "undefined") return null;
-  if (typeof MediaRecorder.isTypeSupported !== "function") return null;
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/mp4",
-    "audio/ogg;codecs=opus",
-  ];
-  return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? null;
-}
+type AccessResult = "ok" | "denied" | "rate_limited" | "unavailable";
 
-async function verifyAccess(code: string): Promise<boolean> {
+async function verifyAccess(code: string): Promise<AccessResult> {
   try {
     const response = await fetch("/api/health?verify=1", {
       headers: { "x-access-code": code },
       cache: "no-store",
     });
-    return response.ok;
+    if (response.ok) return "ok";
+    if (response.status === 429) return "rate_limited";
+    return "denied";
   } catch {
-    return false;
+    return "unavailable";
   }
-}
-
-function WaveBars({ active = false }: { active?: boolean }) {
-  return (
-    <span className={`wave${active ? " is-active" : ""}`} aria-hidden="true">
-      {[0, 1, 2, 3, 4].map((index) => (
-        <i key={index} />
-      ))}
-    </span>
-  );
-}
-
-function MessageRow({
-  entry,
-  onDismiss,
-}: {
-  entry: Entry;
-  onDismiss: (id: string) => void;
-}) {
-  if (entry.role === "error") {
-    return (
-      <div className="msg msg-error" role="alert">
-        <span className="msg-icon">
-          <AlertIcon size={16} />
-        </span>
-        <div className="bubble">{entry.text}</div>
-        <button
-          type="button"
-          className="msg-dismiss"
-          onClick={() => onDismiss(entry.id)}
-          aria-label="Dismiss error"
-        >
-          <CloseIcon size={14} />
-        </button>
-      </div>
-    );
-  }
-
-  const isUser = entry.role === "user";
-
-  return (
-    <div className={`msg ${isUser ? "msg-user" : "msg-agent"}`}>
-      <div className="avatar" aria-hidden="true">
-        {isUser ? <UserIcon size={17} /> : <WaveIcon size={17} />}
-      </div>
-      <div className="msg-body">
-        <span className="msg-role">{isUser ? "You" : "Voxen"}</span>
-        <div className="bubble">{entry.text}</div>
-      </div>
-    </div>
-  );
-}
-
-function TypingRow() {
-  return (
-    <div className="msg msg-agent typing" aria-label="Voxen is thinking">
-      <div className="avatar" aria-hidden="true">
-        <WaveIcon size={17} />
-      </div>
-      <div className="msg-body">
-        <span className="msg-role">Voxen</span>
-        <div className="bubble">
-          <span className="dot" />
-          <span className="dot" />
-          <span className="dot" />
-        </div>
-      </div>
-    </div>
-  );
 }
 
 export default function VoiceAgent() {
@@ -177,114 +94,78 @@ export default function VoiceAgent() {
   const [accessCode, setAccessCode] = useState("");
   const [accessBusy, setAccessBusy] = useState(false);
   const [accessError, setAccessError] = useState("");
-  const [micSupported, setMicSupported] = useState(true);
 
   const [sessionId, setSessionId] = useState("");
   const [status, setStatus] = useState<Status>("idle");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
-  const [elapsed, setElapsed] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [playbackBlocked, setPlaybackBlocked] = useState(false);
-  const [lastAudio, setLastAudio] = useState<string | null>(null);
+  const [muted, setMuted] = useState(false);
 
   const sessionRef = useRef("");
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const mimeRef = useRef("audio/webm");
-  const startedAtRef = useRef(0);
-  const durationRef = useRef(0);
-  const discardRef = useRef(false);
-  const intervalRef = useRef<number | null>(null);
-  const autoStopRef = useRef<number | null>(null);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
-  const playbackResolveRef = useRef<((ok: boolean) => void) | null>(null);
-  const manualStopRef = useRef(false);
   const counterRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const streamAbortRef = useRef<AbortController | null>(null);
+  const textBufferRef = useRef<Map<string, string>>(new Map());
+  const flushFrameRef = useRef<number | null>(null);
+  const hydratedRef = useRef("");
+  const activityRef = useRef(false);
+  const mutedRef = useRef(muted);
+  const recordingRef = useRef(false);
 
-  const recording = status === "recording";
+  mutedRef.current = muted;
 
-  const clearTimers = useCallback(() => {
-    if (intervalRef.current !== null) {
-      window.clearInterval(intervalRef.current);
-      intervalRef.current = null;
-    }
-    if (autoStopRef.current !== null) {
-      window.clearTimeout(autoStopRef.current);
-      autoStopRef.current = null;
-    }
-  }, []);
+  const audio = useAudioQueue();
 
-  const stopStream = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-  }, []);
-
-  const addEntry = useCallback((role: EntryRole, text: string) => {
+  const addEntry = useCallback((role: Entry["role"], text: string): string => {
     counterRef.current += 1;
+    const id = `entry-${counterRef.current}`;
     setEntries((previous) => [
       ...previous,
-      { id: `entry-${counterRef.current}`, role, text, at: Date.now() },
+      { id, role, text, at: Date.now() },
     ]);
+    activityRef.current = true;
+    return id;
   }, []);
 
   const dismissEntry = useCallback((id: string) => {
     setEntries((previous) => previous.filter((entry) => entry.id !== id));
   }, []);
 
-  const stopPlayback = useCallback(() => {
-    manualStopRef.current = true;
-    const audio = audioRef.current;
-    if (audio) {
-      audio.pause();
-      audio.currentTime = 0;
-    }
+  const flushText = useCallback(() => {
+    flushFrameRef.current = null;
+    if (textBufferRef.current.size === 0) return;
 
-    const settle = playbackResolveRef.current;
-    playbackResolveRef.current = null;
-
-    if (settle) {
-      settle(false);
-    } else {
-      if (audioRef.current === audio) audioRef.current = null;
-      setIsPlaying(false);
-    }
+    const updates = new Map(textBufferRef.current);
+    textBufferRef.current.clear();
+    setEntries((previous) =>
+      previous.map((entry) => {
+        const delta = updates.get(entry.id);
+        return delta ? { ...entry, text: entry.text + delta } : entry;
+      }),
+    );
   }, []);
 
-  const playAudio = useCallback(
-    (base64: string): Promise<boolean> => {
-      stopPlayback();
-      manualStopRef.current = false;
-      const audio = new Audio(`data:audio/mpeg;base64,${base64}`);
-      audioRef.current = audio;
-      setIsPlaying(true);
-
-      return new Promise((resolve) => {
-        let settled = false;
-        const done = (ok: boolean) => {
-          if (settled) return;
-          settled = true;
-          audio.onended = null;
-          audio.onerror = null;
-          if (playbackResolveRef.current === done) {
-            playbackResolveRef.current = null;
-          }
-          if (audioRef.current === audio) audioRef.current = null;
-          setIsPlaying(false);
-          resolve(ok);
-        };
-
-        playbackResolveRef.current = done;
-        audio.onended = () => done(true);
-        audio.onerror = () => done(false);
-        audio.play().catch(() => done(false));
-      });
+  const queueText = useCallback(
+    (id: string, delta: string) => {
+      textBufferRef.current.set(
+        id,
+        (textBufferRef.current.get(id) ?? "") + delta,
+      );
+      if (flushFrameRef.current === null) {
+        flushFrameRef.current = window.requestAnimationFrame(flushText);
+      }
     },
-    [stopPlayback],
+    [flushText],
   );
+
+  const flushNow = useCallback(() => {
+    if (flushFrameRef.current !== null) {
+      window.cancelAnimationFrame(flushFrameRef.current);
+      flushFrameRef.current = null;
+    }
+    flushText();
+  }, [flushText]);
 
   const fail = useCallback(
     (error: unknown) => {
@@ -296,22 +177,43 @@ export default function VoiceAgent() {
     [addEntry],
   );
 
+  const recorder = useRecorder({
+    maxSeconds: MAX_RECORD_SECONDS,
+    disabled: false,
+    onStart: () => {
+      streamAbortRef.current?.abort();
+      audio.stop();
+      setBusy(false);
+    },
+    onComplete: (blob, mime, duration) => {
+      void submitAudio(blob, mime, duration);
+    },
+    onError: (message) => fail(new Error(message)),
+  });
+
+  recordingRef.current = recorder.recording;
+
   const authHeaders = useCallback(
     (): Record<string, string> =>
       accessCode ? { "x-access-code": accessCode } : {},
     [accessCode],
   );
 
-  const handleUnauthorized = useCallback(
-    (response: Response): boolean => {
-      if (response.status !== 401) return false;
-      window.localStorage.removeItem(CODE_KEY);
-      setAccessCode("");
-      setAccessRequired(true);
-      return true;
-    },
-    [],
-  );
+  const handleUnauthorized = useCallback((response: Response): boolean => {
+    if (response.status !== 401) return false;
+    window.localStorage.removeItem(CODE_KEY);
+    setAccessCode("");
+    setAccessRequired(true);
+    return true;
+  }, []);
+
+  const adoptSession = useCallback((id: string) => {
+    if (!id || id === sessionRef.current) return;
+    sessionRef.current = id;
+    hydratedRef.current = id;
+    window.localStorage.setItem(SESSION_KEY, id);
+    setSessionId(id);
+  }, []);
 
   useEffect(() => {
     sessionRef.current = getOrCreateSessionId();
@@ -334,8 +236,8 @@ export default function VoiceAgent() {
           setAccessRequired(true);
           const stored = window.localStorage.getItem(CODE_KEY) ?? "";
           if (stored) {
-            const ok = await verifyAccess(stored);
-            if (!cancelled && ok) setAccessCode(stored);
+            const result = await verifyAccess(stored);
+            if (!cancelled && result === "ok") setAccessCode(stored);
           }
         }
       } catch {
@@ -351,12 +253,8 @@ export default function VoiceAgent() {
   }, []);
 
   useEffect(() => {
-    setMicSupported(
-      typeof window !== "undefined" &&
-        typeof window.MediaRecorder !== "undefined" &&
-        Boolean(navigator.mediaDevices?.getUserMedia),
-    );
-  }, []);
+    if (recorder.recording) setStatus("recording");
+  }, [recorder.recording]);
 
   useEffect(() => {
     const node = scrollRef.current;
@@ -365,19 +263,62 @@ export default function VoiceAgent() {
 
   useEffect(() => {
     return () => {
-      clearTimers();
-      stopStream();
-      audioRef.current?.pause();
+      streamAbortRef.current?.abort();
+      if (flushFrameRef.current !== null) {
+        window.cancelAnimationFrame(flushFrameRef.current);
+      }
+      audio.stop();
     };
-  }, [clearTimers, stopStream]);
+  }, [audio]);
+
+  useEffect(() => {
+    if (!sessionId || booting) return;
+    if (accessRequired && !accessCode) return;
+    if (hydratedRef.current === sessionId) return;
+    hydratedRef.current = sessionId;
+
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const response = await fetch("/api/history", {
+          headers: { ...authHeaders(), "x-session-id": sessionId },
+          cache: "no-store",
+        });
+        if (!response.ok) return;
+
+        const data = (await response.json()) as HistoryPayload;
+        if (cancelled || activityRef.current || !data.history?.length) return;
+
+        setEntries(
+          data.history.map((message, index) => ({
+            id: `history-${index}`,
+            role: message.role === "user" ? "user" : "agent",
+            text: message.content,
+            at: 0,
+          })),
+        );
+      } catch {
+        // History is a convenience; a fresh session still works.
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [sessionId, booting, accessRequired, accessCode, authHeaders]);
 
   async function handleAccessSubmit(code: string) {
     setAccessBusy(true);
     setAccessError("");
-    const ok = await verifyAccess(code);
+    const result = await verifyAccess(code);
     setAccessBusy(false);
 
-    if (!ok) {
+    if (result === "rate_limited") {
+      setAccessError("Too many attempts. Wait a minute and try again.");
+      return;
+    }
+    if (result !== "ok") {
       setAccessError("That code didn't work. Check it and try again.");
       return;
     }
@@ -386,104 +327,67 @@ export default function VoiceAgent() {
     setAccessCode(code);
   }
 
-  function stopRecording() {
-    const recorder = recorderRef.current;
-    durationRef.current = Math.max(0, (Date.now() - startedAtRef.current) / 1000);
-    clearTimers();
-    setElapsed(0);
-    setStatus("idle");
-
-    // Stop the recorder before releasing the tracks so the final chunk flushes.
-    if (recorder && recorder.state !== "inactive") recorder.stop();
-    else recorderRef.current = null;
-    stopStream();
-  }
-
-  function cancelRecording() {
-    discardRef.current = true;
-    const recorder = recorderRef.current;
-    clearTimers();
-    setElapsed(0);
-    setStatus("idle");
-
-    if (recorder && recorder.state !== "inactive") recorder.stop();
-    else recorderRef.current = null;
-    stopStream();
-  }
-
-  function onRecordingStopped() {
-    stopStream();
-    const mime = mimeRef.current;
-    const chunks = chunksRef.current;
-    chunksRef.current = [];
-    recorderRef.current = null;
-
-    if (discardRef.current) {
-      discardRef.current = false;
-      return;
-    }
-
-    const blob = new Blob(chunks, { type: mime });
-    if (blob.size === 0) {
-      fail(new Error("No audio was captured. Try again."));
-      return;
-    }
-
-    void submitAudio(blob, mime);
-  }
-
-  async function submitAudio(blob: Blob, mime: string) {
-    setBusy(true);
-    setStatus("thinking");
-    setPlaybackBlocked(false);
+  async function runStream(
+    response: Response,
+    controller: AbortController,
+    userEntryId: string | null,
+  ): Promise<void> {
+    let completed = false;
+    // Keep this turn's entry ids local. Shared refs would let an aborted turn
+    // dismiss bubbles that belong to the next one.
+    let pendingUserId: string | null = userEntryId;
+    let agentEntryId: string | null = null;
 
     try {
-      const extension = mime.includes("mp4")
-        ? "m4a"
-        : mime.includes("ogg")
-          ? "ogg"
-          : "webm";
-      const form = new FormData();
-      form.append("audio", blob, `recording.${extension}`);
-      form.append("session_id", sessionRef.current);
-      form.append("audio_duration", durationRef.current.toFixed(2));
-
-      const response = await fetch("/api/voice", {
-        method: "POST",
-        body: form,
-        headers: authHeaders(),
-      });
-      const data = (await response.json().catch(() => ({}))) as ReplyPayload;
-
       if (!response.ok) {
         handleUnauthorized(response);
-        throw new Error(
-          data.detail?.message || "The request failed. Please try again.",
-        );
+        throw await errorFromResponse(response);
       }
 
-      if (data.transcript) addEntry("user", data.transcript);
-      if (data.reply) addEntry("agent", data.reply);
+      await consumeSse(response, {
+        onSession: adoptSession,
+        onTranscript: (transcript) => {
+          pendingUserId = addEntry("user", transcript);
+        },
+        onDelta: (text) => {
+          if (!agentEntryId) agentEntryId = addEntry("agent", "");
+          queueText(agentEntryId, text);
+          setStatus("speaking");
+        },
+        onAudio: (index, chunk) => {
+          if (!mutedRef.current) audio.enqueue(index, chunk);
+        },
+        onDone: () => {
+          completed = true;
+        },
+      });
 
-      if (data.audio) {
-        setStatus("speaking");
-        const played = await playAudio(data.audio);
-        if (!played && !manualStopRef.current) {
-          setLastAudio(data.audio);
-          setPlaybackBlocked(true);
-        }
+      flushNow();
+
+      if (!completed) {
+        throw new ApiError(502, "The response stream ended unexpectedly.");
       }
+
+      await audio.waitForIdle();
+      if (!recordingRef.current) setStatus("idle");
     } catch (error) {
-      fail(error);
+      flushNow();
+
+      if (completed) return;
+
+      audio.stop();
+      if (pendingUserId) dismissEntry(pendingUserId);
+      if (agentEntryId) dismissEntry(agentEntryId);
+
+      if (!controller.signal.aborted) fail(error);
     } finally {
-      setBusy(false);
-      setStatus("idle");
+      flushNow();
     }
   }
 
   async function submitText(raw: string) {
     const message = raw.trim();
-    if (!message || busy || recording) return;
+    if (!message || busy || recorder.recording) return;
     if (message.length > MAX_MESSAGE_CHARS) {
       fail(
         new Error(`Messages are limited to ${MAX_MESSAGE_CHARS} characters.`),
@@ -491,14 +395,17 @@ export default function VoiceAgent() {
       return;
     }
 
+    setDraft("");
+    audio.begin();
     setBusy(true);
     setStatus("thinking");
-    setPlaybackBlocked(false);
-    addEntry("user", message);
-    setDraft("");
+    const userEntryId = addEntry("user", message);
+
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
 
     try {
-      const response = await fetch("/api/chat", {
+      const response = await fetch("/api/chat/stream", {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -507,113 +414,108 @@ export default function VoiceAgent() {
         body: JSON.stringify({
           session_id: sessionRef.current,
           message,
-          speak: true,
+          speak: !muted,
         }),
+        signal: controller.signal,
       });
-      const data = (await response.json().catch(() => ({}))) as ReplyPayload;
 
-      if (!response.ok) {
-        handleUnauthorized(response);
-        throw new Error(
-          data.detail?.message || "The request failed. Please try again.",
-        );
-      }
-
-      if (data.reply) addEntry("agent", data.reply);
-
-      if (data.audio) {
-        setStatus("speaking");
-        const played = await playAudio(data.audio);
-        if (!played && !manualStopRef.current) {
-          setLastAudio(data.audio);
-          setPlaybackBlocked(true);
-        }
-      }
+      await runStream(response, controller, userEntryId);
     } catch (error) {
-      fail(error);
+      if (!controller.signal.aborted) fail(error);
     } finally {
-      setBusy(false);
-      setStatus("idle");
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null;
+        setBusy(false);
+      }
     }
   }
 
-  async function startRecording() {
-    if (busy || recording || recorderRef.current) return;
-    stopPlayback();
+  async function submitAudio(
+    blob: Blob,
+    mime: string,
+    durationSeconds: number,
+  ) {
+    audio.begin();
+    setBusy(true);
+    setStatus("thinking");
 
-    let stream: MediaStream;
+    const extension = mime.includes("mp4")
+      ? "m4a"
+      : mime.includes("ogg")
+        ? "ogg"
+        : "webm";
+    const form = new FormData();
+    form.append("audio", blob, `recording.${extension}`);
+    form.append("session_id", sessionRef.current);
+    form.append("audio_duration", durationSeconds.toFixed(2));
+    form.append("speak", String(!muted));
+
+    const controller = new AbortController();
+    streamAbortRef.current = controller;
+
     try {
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
+      const response = await fetch("/api/voice/stream", {
+        method: "POST",
+        body: form,
+        headers: authHeaders(),
+        signal: controller.signal,
       });
-    } catch {
-      fail(
-        new Error(
-          "Microphone access was blocked. Allow microphone permission in your browser and try again.",
-        ),
-      );
-      return;
+
+      await runStream(response, controller, null);
+    } catch (error) {
+      if (!controller.signal.aborted) fail(error);
+    } finally {
+      if (streamAbortRef.current === controller) {
+        streamAbortRef.current = null;
+        setBusy(false);
+      }
     }
-
-    const mime = pickMimeType();
-
-    let recorder: MediaRecorder;
-    try {
-      recorder = mime
-        ? new MediaRecorder(stream, { mimeType: mime })
-        : new MediaRecorder(stream);
-    } catch {
-      stream.getTracks().forEach((track) => track.stop());
-      fail(new Error("This browser cannot record audio."));
-      return;
-    }
-
-    streamRef.current = stream;
-    recorderRef.current = recorder;
-    mimeRef.current = recorder.mimeType || mime || "audio/webm";
-    chunksRef.current = [];
-    discardRef.current = false;
-    startedAtRef.current = Date.now();
-
-    recorder.addEventListener("dataavailable", (event) => {
-      if (event.data.size > 0) chunksRef.current.push(event.data);
-    });
-    recorder.addEventListener("stop", onRecordingStopped, { once: true });
-
-    recorder.start(250);
-    setElapsed(0);
-    setStatus("recording");
-
-    intervalRef.current = window.setInterval(() => {
-      setElapsed((Date.now() - startedAtRef.current) / 1000);
-    }, 200);
-    autoStopRef.current = window.setTimeout(
-      stopRecording,
-      MAX_RECORD_SECONDS * 1000,
-    );
   }
 
   function toggleRecording() {
-    if (recording) stopRecording();
-    else void startRecording();
+    if (recorder.recording) recorder.stop();
+    else void recorder.start();
+  }
+
+  function cancelRecording() {
+    recorder.cancel();
+    setStatus("idle");
+  }
+
+  function stopSpeaking() {
+    streamAbortRef.current?.abort();
+    audio.stop();
+    setStatus("idle");
+  }
+
+  function toggleMute() {
+    setMuted((previous) => {
+      const next = !previous;
+      if (next) audio.stop();
+      return next;
+    });
+  }
+
+  async function playLastReply() {
+    setStatus("speaking");
+    await audio.resume();
+    if (!recordingRef.current) setStatus("idle");
   }
 
   async function resetConversation() {
-    if (busy) return;
-    stopPlayback();
+    streamAbortRef.current?.abort();
+    audio.stop();
+    flushNow();
     setEntries([]);
     setDraft("");
     setStatus("idle");
-    setPlaybackBlocked(false);
-    setLastAudio(null);
+    setBusy(false);
 
     const previous = sessionRef.current;
     const next = createSessionId();
     sessionRef.current = next;
+    hydratedRef.current = next;
+    activityRef.current = false;
     setSessionId(next);
 
     try {
@@ -630,15 +532,9 @@ export default function VoiceAgent() {
     }
   }
 
-  async function playLastReply() {
-    if (!lastAudio) return;
-    setStatus("speaking");
-    const ok = await playAudio(lastAudio);
-    setPlaybackBlocked(!ok && !manualStopRef.current);
-    setStatus("idle");
-  }
-
   const turns = entries.filter((entry) => entry.role !== "error").length;
+  const statusLabel =
+    muted && status === "speaking" ? "Responding" : STATUS_LABEL[status];
 
   if (booting) {
     return (
@@ -679,13 +575,13 @@ export default function VoiceAgent() {
             aria-live="polite"
           >
             <i aria-hidden="true" />
-            {STATUS_LABEL[status]}
+            {statusLabel}
           </span>
           <button
             type="button"
             className="btn"
             onClick={() => void resetConversation()}
-            disabled={busy || entries.length === 0}
+            disabled={entries.length === 0 && !busy}
           >
             <RefreshIcon size={16} />
             <span>New session</span>
@@ -710,7 +606,7 @@ export default function VoiceAgent() {
                 <h1>Talk through anything, out loud.</h1>
                 <p>
                   Ask a question, search the web, or think through a problem.
-                  Voxen listens, reasons, and answers in a natural voice.
+                  Voxen listens, reasons, and answers as it speaks.
                 </p>
                 <div className="suggestions">
                   {SUGGESTIONS.map((suggestion) => (
@@ -741,15 +637,19 @@ export default function VoiceAgent() {
           </div>
 
           <div className="composer">
-            {isPlaying ? (
+            {audio.isPlaying ? (
               <div className="now-playing">
                 <WaveBars active />
                 <span>Speaking the reply…</span>
-                <button type="button" className="link" onClick={stopPlayback}>
+                <button
+                  type="button"
+                  className="link"
+                  onClick={stopSpeaking}
+                >
                   Stop
                 </button>
               </div>
-            ) : playbackBlocked && lastAudio ? (
+            ) : audio.playbackBlocked && audio.lastAudio ? (
               <div className="now-playing blocked">
                 <PlayIcon size={14} />
                 <span>Your browser blocked autoplay.</span>
@@ -772,32 +672,38 @@ export default function VoiceAgent() {
             >
               <button
                 type="button"
-                className={`mic${recording ? " is-recording" : ""}`}
+                className={`mic${recorder.recording ? " is-recording" : ""}`}
                 onClick={toggleRecording}
-                disabled={!micSupported || (busy && !recording)}
-                aria-label={recording ? "Stop recording" : "Start recording"}
+                disabled={!recorder.micSupported}
+                aria-label={
+                  recorder.recording ? "Stop recording" : "Start recording"
+                }
                 title={
-                  micSupported
-                    ? recording
+                  recorder.micSupported
+                    ? recorder.recording
                       ? "Stop and send"
                       : "Start recording"
                     : "Microphone is not supported in this browser"
                 }
               >
-                {recording ? <StopIcon size={18} /> : <MicIcon size={20} />}
+                {recorder.recording ? (
+                  <StopIcon size={18} />
+                ) : (
+                  <MicIcon size={20} />
+                )}
               </button>
 
               <input
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 placeholder={
-                  recording
-                    ? `Listening… ${formatTime(elapsed)}`
+                  recorder.recording
+                    ? `Listening… ${formatTime(recorder.elapsed)}`
                     : "Type a message, or tap the mic to speak"
                 }
                 aria-label="Message"
                 maxLength={MAX_MESSAGE_CHARS}
-                disabled={recording}
+                disabled={recorder.recording}
                 enterKeyHint="send"
                 autoComplete="off"
               />
@@ -805,7 +711,7 @@ export default function VoiceAgent() {
               <button
                 type="submit"
                 className="send"
-                disabled={!draft.trim() || busy || recording}
+                disabled={!draft.trim() || busy || recorder.recording}
                 aria-label="Send message"
               >
                 <SendIcon size={18} />
@@ -813,12 +719,14 @@ export default function VoiceAgent() {
             </form>
 
             <div className="composer-meta">
-              {recording ? (
+              {recorder.recording ? (
                 <div className="recording-meta">
                   <span className="rec-dot" aria-hidden="true" />
                   <span>
-                    {formatTime(elapsed)}{" "}
-                    <span className="muted">/ {formatTime(MAX_RECORD_SECONDS)}</span>
+                    {formatTime(recorder.elapsed)}{" "}
+                    <span className="muted">
+                      / {formatTime(MAX_RECORD_SECONDS)}
+                    </span>
                   </span>
                   <WaveBars active />
                   <button
@@ -830,10 +738,20 @@ export default function VoiceAgent() {
                   </button>
                 </div>
               ) : (
-                <span className="hint">
-                  Tap the mic to talk · Enter to send · Replies play
-                  automatically
-                </span>
+                <>
+                  <span className="hint">
+                    Tap the mic to talk · Enter to send · Replies play
+                    automatically
+                  </span>
+                  <button
+                    type="button"
+                    className="link"
+                    onClick={toggleMute}
+                    aria-pressed={muted}
+                  >
+                    {muted ? "Sound off" : "Sound on"}
+                  </button>
+                </>
               )}
             </div>
           </div>
@@ -843,18 +761,18 @@ export default function VoiceAgent() {
           <section className="card">
             <div className="card-head">
               <h2>Session</h2>
-              <span className={`pill pill-${status}`}>
-                {STATUS_LABEL[status]}
-              </span>
+              <span className={`pill pill-${status}`}>{statusLabel}</span>
             </div>
             <dl className="stats">
               <div>
-                <dt>Turns</dt>
+                <dt>Messages</dt>
                 <dd>{turns}</dd>
               </div>
               <div>
                 <dt>Input</dt>
-                <dd>{micSupported ? "Voice + text" : "Text only"}</dd>
+                <dd>
+                  {recorder.micSupported ? "Voice + text" : "Text only"}
+                </dd>
               </div>
               <div>
                 <dt>ID</dt>
@@ -884,7 +802,7 @@ export default function VoiceAgent() {
                 <span>3</span>
                 <div>
                   <strong>Listen</strong>
-                  <p>The answer is spoken back to you.</p>
+                  <p>The answer streams in text and audio.</p>
                 </div>
               </li>
             </ol>
