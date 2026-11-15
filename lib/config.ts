@@ -12,6 +12,41 @@ function toSearchProvider(value: string | undefined): SearchProvider {
   return "auto";
 }
 
+export type ReasoningEffort =
+  | "none"
+  | "minimal"
+  | "low"
+  | "medium"
+  | "high"
+  | "xhigh"
+  | "max";
+
+const REASONING_EFFORTS = new Set<string>([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+]);
+
+/**
+ * Reasoning is optional per model. An empty value, `default`, or `off` omits
+ * the parameter entirely so older Chat Completions models keep working.
+ */
+function toReasoningEffort(
+  value: string | undefined,
+): ReasoningEffort | null {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (normalized === "" || normalized === "default" || normalized === "off") {
+    return null;
+  }
+  return REASONING_EFFORTS.has(normalized)
+    ? (normalized as ReasoningEffort)
+    : "none";
+}
+
 /**
  * Platforms that always put a trusted proxy in front of the app. Elsewhere
  * we ignore X-Forwarded-For unless the deployer explicitly opts in, because a
@@ -35,8 +70,12 @@ export const config = {
 
   // AI provider
   openaiApiKey: process.env.OPENAI_API_KEY ?? "",
-  sttModel: process.env.STT_MODEL ?? "gpt-4o-mini-transcribe",
-  llmModel: process.env.LLM_MODEL ?? "gpt-4o-mini",
+  sttModel: process.env.STT_MODEL ?? "gpt-transcribe",
+  llmModel: process.env.LLM_MODEL ?? "gpt-6-luna",
+  // Chat Completions tool calls on gpt-6-luna require reasoning_effort "none".
+  llmReasoningEffort: toReasoningEffort(
+    process.env.LLM_REASONING_EFFORT ?? "none",
+  ),
   ttsModel: process.env.TTS_MODEL ?? "gpt-4o-mini-tts",
   ttsVoice: process.env.TTS_VOICE ?? "alloy",
   maxToolRounds: toNumber(process.env.MAX_TOOL_ROUNDS, 4),
