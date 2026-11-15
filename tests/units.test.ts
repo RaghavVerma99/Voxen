@@ -5,6 +5,7 @@ import { config } from "@/lib/config";
 import { AppError } from "@/lib/errors";
 import { clientAddress, guardRequest } from "@/lib/guard";
 import { rateLimit } from "@/lib/ratelimit";
+import { withSessionLock } from "@/lib/session-lock";
 import { SentenceChunker } from "@/lib/sse";
 import { searchWeb, runTool } from "@/lib/tools";
 import { requireSessionId, resolveSessionId } from "@/lib/validate";
@@ -77,6 +78,54 @@ describe("session ids", () => {
     const generated = resolveSessionId(undefined);
     expect(generated.length).toBeGreaterThan(0);
     expect(resolveSessionId(generated)).toBe(generated);
+  });
+});
+
+describe("session lock", () => {
+  it("serializes work for the same session", async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const first = withSessionLock("lock-session", async () => {
+      order.push("first:start");
+      await gate;
+      order.push("first:end");
+    });
+    const second = withSessionLock("lock-session", async () => {
+      order.push("second:start");
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual(["first:start"]);
+
+    release();
+    await Promise.all([first, second]);
+    expect(order).toEqual(["first:start", "first:end", "second:start"]);
+  });
+
+  it("does not block other sessions", async () => {
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const first = withSessionLock("lock-a", async () => {
+      order.push("a:start");
+      await gate;
+    });
+    const second = withSessionLock("lock-b", async () => {
+      order.push("b:start");
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order.sort()).toEqual(["a:start", "b:start"]);
+
+    release();
+    await Promise.all([first, second]);
   });
 });
 

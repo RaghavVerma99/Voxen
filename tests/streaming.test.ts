@@ -16,6 +16,8 @@ import { config } from "@/lib/config";
 import { getHistory } from "@/lib/conversation";
 import { AppError } from "@/lib/errors";
 import { budgetSnapshot } from "@/lib/ratelimit";
+import { sseResponse } from "@/lib/sse-response";
+import { streamTurn } from "@/lib/streaming";
 import type { StreamHandlers } from "@/lib/ai";
 
 const mockTranscribe = vi.mocked(provider.transcribeAudio);
@@ -113,21 +115,21 @@ describe("chat stream", () => {
       "session",
       "delta",
       "delta",
-      "audio",
       "done",
+      "audio",
     ]);
     expect(events[0].data).toEqual({ session_id: sessionId });
     expect(events[1].data).toEqual({ text: "Hello " });
-    expect(events[3].data).toMatchObject({ index: 0, audio: "QUJD" });
-    expect(events[4].data).toMatchObject({
+    expect(events[3].data).toMatchObject({
       session_id: sessionId,
       reply: "Hello world.",
       spoken: true,
     });
-    expect(events[4].data.history).toEqual([
+    expect(events[3].data.history).toEqual([
       { role: "user", content: "hi" },
       { role: "assistant", content: "Hello world." },
     ]);
+    expect(events[4].data).toMatchObject({ index: 0, audio: "QUJD" });
     expect(getHistory(sessionId)).toHaveLength(2);
   });
 
@@ -170,6 +172,41 @@ describe("chat stream", () => {
     expect(budgetSnapshot().used).toBe(before);
   });
 
+  it("commits and sends done without waiting for speech", async () => {
+    const sessionId = nextSession();
+    mockStream.mockImplementation(deltaStream("Hello there."));
+
+    let releaseAudio: (() => void) | undefined;
+    mockSynthesize.mockImplementation(
+      () =>
+        new Promise<string>((resolve) => {
+          releaseAudio = () => resolve("QUJD");
+        }),
+    );
+
+    const events: string[] = [];
+    const turn = streamTurn({
+      sessionId,
+      userContent: "hi",
+      requestId: "ordering-test",
+      signal: new AbortController().signal,
+      send: (event) => {
+        events.push(event);
+        // Release on the next macrotask so the queued TTS call has started.
+        if (event === "done") {
+          setTimeout(() => releaseAudio?.(), 0);
+        }
+      },
+    });
+
+    await expect(turn).resolves.toBe("Hello there.");
+    expect(events).toEqual(["delta", "done", "audio"]);
+    expect(getHistory(sessionId).map((message) => message.content)).toEqual([
+      "hi",
+      "Hello there.",
+    ]);
+  });
+
   it("rejects invalid requests before starting the stream", async () => {
     const response = await postChatStream(
       chatStreamRequest({ session_id: nextSession(), message: "  " }),
@@ -199,11 +236,11 @@ describe("voice stream", () => {
       "session",
       "transcript",
       "delta",
-      "audio",
       "done",
+      "audio",
     ]);
     expect(events[1].data).toEqual({ transcript: "what time is it" });
-    expect(events.at(-1)?.data).toMatchObject({
+    expect(events.find((event) => event.event === "done")?.data).toMatchObject({
       reply: "It is noon.",
       spoken: true,
     });
@@ -245,5 +282,70 @@ describe("voice stream", () => {
     expect(body.detail.error_code).toBe("INVALID_AUDIO_DURATION");
     expect(mockTranscribe).not.toHaveBeenCalled();
     expect(budgetSnapshot().used).toBe(before);
+  });
+});
+
+describe("stream lifecycle", () => {
+  it("sends keep-alive comments while work is in flight", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+
+    const response = sseResponse(
+      new NextRequest("http://localhost/api/chat/stream"),
+      {
+        requestId: "heartbeat-test",
+        heartbeatMs: 5,
+        timeoutMs: 2_000,
+        run: async (send) => {
+          await gate;
+          send("done", { ok: true });
+        },
+      },
+    );
+
+    const reader = response.body!.getReader();
+    const decoder = new TextDecoder();
+    let raw = "";
+
+    while (!raw.includes(": ping")) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      raw += decoder.decode(value, { stream: true });
+    }
+
+    expect(raw).toContain(": ping");
+    release();
+
+    while (true) {
+      const { done } = await reader.read();
+      if (done) break;
+    }
+    reader.releaseLock();
+  });
+
+  it("ends a stalled turn with TURN_TIMEOUT", async () => {
+    const response = sseResponse(
+      new NextRequest("http://localhost/api/chat/stream"),
+      {
+        requestId: "timeout-test",
+        heartbeatMs: 1_000,
+        timeoutMs: 10,
+        run: async (_send, signal) => {
+          await new Promise<void>((resolve) => {
+            if (signal.aborted) resolve();
+            else signal.addEventListener("abort", () => resolve(), { once: true });
+          });
+        },
+      },
+    );
+
+    const events = parseEvents(await response.text());
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      event: "error",
+      data: { error_code: "TURN_TIMEOUT", request_id: "timeout-test" },
+    });
   });
 });

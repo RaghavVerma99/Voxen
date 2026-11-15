@@ -5,6 +5,7 @@ import {
   getHistory,
 } from "./conversation";
 import { errorMessage, logWarning } from "./logger";
+import { withSessionLock } from "./session-lock";
 import { SentenceChunker } from "./sse";
 
 export interface StreamTurnOptions {
@@ -16,12 +17,31 @@ export interface StreamTurnOptions {
   speak?: boolean;
 }
 
+interface TurnOutcome {
+  reply: string;
+  audioChain: Promise<void>;
+}
+
 /**
- * Runs one streamed turn: model text is forwarded as it arrives, sentences
- * are synthesized in order as a background queue, and the turn is committed
- * only after the model finishes successfully.
+ * Runs one streamed turn. Turns for the same session are serialized so a
+ * second request cannot read history before the first one commits.
+ *
+ * The turn is committed and `done` is sent as soon as the model finishes.
+ * Speech synthesis keeps draining in the background for the same connection,
+ * so a slow TTS provider cannot delay the client's text or history update.
  */
 export async function streamTurn(options: StreamTurnOptions): Promise<string> {
+  const outcome = await withSessionLock(options.sessionId, () =>
+    runTurn(options),
+  );
+
+  await outcome.audioChain;
+  return outcome.reply;
+}
+
+async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
+  if (options.signal.aborted) throw abortError();
+
   const chunker = new SentenceChunker();
   let audioIndex = 0;
   let audioChain = Promise.resolve();
@@ -63,7 +83,6 @@ export async function streamTurn(options: StreamTurnOptions): Promise<string> {
   );
 
   for (const chunk of chunker.flush()) queueAudio(chunk);
-  await audioChain;
 
   // A cancelled turn is never committed, so client and server agree on what
   // happened even if the user stops generation midway.
@@ -77,5 +96,11 @@ export async function streamTurn(options: StreamTurnOptions): Promise<string> {
     });
   }
 
-  return reply;
+  return { reply, audioChain };
+}
+
+function abortError(): Error {
+  const err = new Error("The turn was cancelled.");
+  err.name = "AbortError";
+  return err;
 }

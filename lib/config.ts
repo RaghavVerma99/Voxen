@@ -70,6 +70,10 @@ export const config = {
   rateLimitWindowMs: toNumber(process.env.RATE_LIMIT_WINDOW_MS, 60_000),
   dailyRequestBudget: toNumber(process.env.DAILY_REQUEST_BUDGET, 1_000),
 
+  // Streaming lifecycle
+  turnTimeoutMs: toNumber(process.env.TURN_TIMEOUT_MS, 90_000),
+  sseHeartbeatMs: toNumber(process.env.SSE_HEARTBEAT_MS, 15_000),
+
   // Shared access code. Production refuses paid traffic unless this is a
   // long enough secret, so a misconfigured deploy cannot expose the API.
   accessCode,

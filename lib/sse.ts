@@ -5,6 +5,11 @@ export function encodeSse(event: string, data: unknown): Uint8Array {
   return encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
 }
 
+/** Encodes an SSE comment, used as a keep-alive while work is in flight. */
+export function encodeSseComment(text: string): Uint8Array {
+  return encoder.encode(`: ${text}\n\n`);
+}
+
 export function sseHeaders(): Record<string, string> {
   return {
     "content-type": "text/event-stream; charset=utf-8",
