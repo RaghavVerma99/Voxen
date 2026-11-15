@@ -17,7 +17,8 @@ export type ErrorCode =
   | "NOTHING_HEARD"
   | "STT_FAILED"
   | "LLM_FAILED"
-  | "TTS_FAILED";
+  | "TTS_FAILED"
+  | "TURN_TIMEOUT";
 
 export type ErrorHeaders = Record<string, string>;
 
