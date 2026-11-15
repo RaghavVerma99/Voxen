@@ -57,13 +57,18 @@ beforeEach(() => {
 });
 
 describe("transcribeAudio", () => {
-  it("returns the trimmed transcript", async () => {
-    provider.createTranscription.mockResolvedValue("  hello world  ");
+  it("reads the JSON transcript and trims it", async () => {
+    provider.createTranscription.mockResolvedValue({ text: "  hello world  " });
     const file = new File([new Uint8Array(8)], "clip.webm", {
       type: "audio/webm",
     });
 
     await expect(transcribeAudio(file)).resolves.toBe("hello world");
+
+    const request = provider.createTranscription.mock.calls[0][0] as {
+      response_format?: string;
+    };
+    expect(request.response_format).toBe("json");
   });
 
   it("maps provider failures to STT_FAILED", async () => {
@@ -87,6 +92,37 @@ describe("generateResponse", () => {
       generateResponse([{ role: "user", content: "hi" }]),
     ).resolves.toBe("Hello there.");
     expect(provider.createChat).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses completion-token limits and disables reasoning for tool calls", async () => {
+    provider.createChat.mockResolvedValue(textReply("ok"));
+
+    await generateResponse([{ role: "user", content: "hi" }]);
+
+    const request = provider.createChat.mock.calls[0][0] as Record<
+      string,
+      unknown
+    >;
+    expect(request.max_completion_tokens).toBe(config.maxReplyTokens);
+    expect(request.max_tokens).toBeUndefined();
+    expect(request.reasoning_effort).toBe("none");
+  });
+
+  it("omits reasoning_effort when reasoning is disabled", async () => {
+    const original = config.llmReasoningEffort;
+    config.llmReasoningEffort = null;
+    provider.createChat.mockResolvedValue(textReply("ok"));
+
+    try {
+      await generateResponse([{ role: "user", content: "hi" }]);
+      const request = provider.createChat.mock.calls[0][0] as Record<
+        string,
+        unknown
+      >;
+      expect(request.reasoning_effort).toBeUndefined();
+    } finally {
+      config.llmReasoningEffort = original;
+    }
   });
 
   it("falls back to a retry prompt on empty content", async () => {

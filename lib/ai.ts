@@ -1,5 +1,7 @@
 import OpenAI from "openai";
 import type {
+  ChatCompletionCreateParamsNonStreaming,
+  ChatCompletionCreateParamsStreaming,
   ChatCompletionMessageParam,
   ChatCompletionMessageToolCall,
 } from "openai/resources/chat/completions";
@@ -45,11 +47,13 @@ export async function transcribeAudio(
       {
         model: config.sttModel,
         file,
-        response_format: "text",
+        // gpt-transcribe returns a JSON envelope; request it explicitly and
+        // read `.text` rather than relying on the deprecated "text" format.
+        response_format: "json",
       },
       { signal },
     );
-    return result.trim();
+    return result.text.trim();
   } catch (err) {
     throw new AppError("STT_FAILED", errorMessage(err), 502);
   }
@@ -80,12 +84,17 @@ export async function generateResponse(messages: LlmMessage[]): Promise<string> 
   for (let round = 0; round <= config.maxToolRounds; round += 1) {
     let completion;
     try {
-      completion = await client().chat.completions.create({
+      const params: ChatCompletionCreateParamsNonStreaming = {
         model: config.llmModel,
         messages: request as ChatCompletionMessageParam[],
         tools: TOOL_SCHEMAS,
-        max_tokens: config.maxReplyTokens,
-      });
+        // Newer models reject max_tokens; this is the supported cap.
+        max_completion_tokens: config.maxReplyTokens,
+      };
+      if (config.llmReasoningEffort) {
+        params.reasoning_effort = config.llmReasoningEffort;
+      }
+      completion = await client().chat.completions.create(params);
     } catch (err) {
       throw new AppError("LLM_FAILED", errorMessage(err), 502);
     }
@@ -158,16 +167,19 @@ export async function streamResponse(
   for (let round = 0; round <= config.maxToolRounds; round += 1) {
     let completion;
     try {
-      completion = await client().chat.completions.create(
-        {
-          model: config.llmModel,
-          messages: request as ChatCompletionMessageParam[],
-          tools: TOOL_SCHEMAS,
-          max_tokens: config.maxReplyTokens,
-          stream: true,
-        },
-        { signal: handlers.signal },
-      );
+      const params: ChatCompletionCreateParamsStreaming = {
+        model: config.llmModel,
+        messages: request as ChatCompletionMessageParam[],
+        tools: TOOL_SCHEMAS,
+        max_completion_tokens: config.maxReplyTokens,
+        stream: true,
+      };
+      if (config.llmReasoningEffort) {
+        params.reasoning_effort = config.llmReasoningEffort;
+      }
+      completion = await client().chat.completions.create(params, {
+        signal: handlers.signal,
+      });
     } catch (err) {
       if (isAbortError(err)) throw err;
       throw new AppError("LLM_FAILED", errorMessage(err), 502);
