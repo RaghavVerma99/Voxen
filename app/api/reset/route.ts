@@ -1,7 +1,9 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
+import { readJson } from "@/lib/body";
+import { config } from "@/lib/config";
 import { reset } from "@/lib/conversation";
-import { guardRequest } from "@/lib/guard";
+import { guardRequest, rateLimitHeaders } from "@/lib/guard";
 import { jsonOk, toErrorResponse } from "@/lib/http";
 import { requireSessionId } from "@/lib/validate";
 
@@ -13,12 +15,17 @@ export async function POST(request: NextRequest) {
   const requestId = randomUUID();
 
   try {
-    guardRequest(request, "reset");
-    const body = (await request.json().catch(() => null)) as ResetBody | null;
+    const limits = guardRequest(request, "reset");
+    const body = await readJson<ResetBody>(request, config.maxChatRequestBytes);
     const sessionId = requireSessionId(body?.session_id);
 
     reset(sessionId);
-    return jsonOk({ status: "ok", session_id: sessionId }, requestId);
+    return jsonOk(
+      { status: "ok", session_id: sessionId },
+      requestId,
+      200,
+      rateLimitHeaders(limits),
+    );
   } catch (err) {
     return toErrorResponse(err, requestId);
   }
