@@ -1,6 +1,6 @@
 {
   "name": "voxen",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "private": true,
   "description": "Voxen — a browser-based AI voice agent with web search and spoken answers.",
   "engines": {
@@ -13,20 +13,21 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm test"
+    "check": "npm run typecheck && npm test",
+    "audit": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {
     "cheerio": "^1.2.0",
-    "next": "^16.3.5",
-    "openai": "^7.19.0",
-    "react": "^19.3.0",
-    "react-dom": "^19.3.0"
+    "next": "^16.4.6",
+    "openai": "^7.57.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "typescript": "^7.0.2",
-    "vitest": "^5.0.1"
+    "vitest": "^5.1.0"
   }
 }
