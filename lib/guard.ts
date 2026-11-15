@@ -6,6 +6,7 @@ import { logEvent } from "./logger";
 import {
   consumeDailyBudget,
   rateLimit,
+  refundDailyBudget,
   type RateLimitResult,
 } from "./ratelimit";
 
@@ -119,5 +120,12 @@ export function consumeBudget(route: string): void {
       "The daily request budget has been reached. Please try again tomorrow.",
       429,
     );
+  }
+}
+
+/** Releases a reservation made by consumeBudget when the turn fails. */
+export function releaseBudget(route: string): void {
+  if (refundDailyBudget()) {
+    logEvent("request.budget_released", { route });
   }
 }

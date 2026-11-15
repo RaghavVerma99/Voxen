@@ -4,7 +4,12 @@ import { ensureAiConfigured, transcribeAudio } from "@/lib/ai";
 import { readFormData } from "@/lib/body";
 import { config } from "@/lib/config";
 import { AppError } from "@/lib/errors";
-import { consumeBudget, guardRequest, rateLimitHeaders } from "@/lib/guard";
+import {
+  consumeBudget,
+  guardRequest,
+  rateLimitHeaders,
+  releaseBudget,
+} from "@/lib/guard";
 import { toErrorResponse } from "@/lib/http";
 import { logEvent, redactSessionId } from "@/lib/logger";
 import { sseResponse } from "@/lib/sse-response";
@@ -25,7 +30,9 @@ export async function POST(request: NextRequest) {
     );
     const audio = formData.get("audio");
     const sessionId = resolveSessionId(formData.get("session_id"));
-    const duration = Number(formData.get("audio_duration"));
+    const durationRaw = formData.get("audio_duration");
+    const duration =
+      typeof durationRaw === "string" ? Number(durationRaw) : Number.NaN;
 
     if (!(audio instanceof File) || audio.size === 0) {
       throw new AppError("EMPTY_AUDIO", "No audio received", 400);
@@ -37,7 +44,19 @@ export async function POST(request: NextRequest) {
         413,
       );
     }
-    if (Number.isFinite(duration) && duration > config.maxAudioSeconds) {
+    if (
+      typeof durationRaw !== "string" ||
+      durationRaw.trim() === "" ||
+      !Number.isFinite(duration) ||
+      duration < 0
+    ) {
+      throw new AppError(
+        "INVALID_AUDIO_DURATION",
+        "audio_duration is required and must be a non-negative number of seconds",
+        400,
+      );
+    }
+    if (duration > config.maxAudioSeconds) {
       throw new AppError(
         "AUDIO_TOO_LONG",
         `Audio exceeds ${config.maxAudioSeconds}s limit`,
@@ -46,8 +65,15 @@ export async function POST(request: NextRequest) {
     }
 
     consumeBudget("voice-stream");
-    const transcript = (await transcribeAudio(audio, request.signal)).trim();
+    let transcript: string;
+    try {
+      transcript = (await transcribeAudio(audio, request.signal)).trim();
+    } catch (err) {
+      releaseBudget("voice-stream");
+      throw err;
+    }
     if (!transcript) {
+      releaseBudget("voice-stream");
       throw new AppError("NOTHING_HEARD", "No speech detected in audio", 400);
     }
 
@@ -58,23 +84,28 @@ export async function POST(request: NextRequest) {
         send("session", { session_id: sessionId });
         send("transcript", { transcript });
 
-        const reply = await streamTurn({
-          sessionId,
-          userContent: transcript,
-          requestId,
-          signal,
-          send,
-          speak: formData.get("speak") !== "false",
-        });
+        try {
+          const reply = await streamTurn({
+            sessionId,
+            userContent: transcript,
+            requestId,
+            signal,
+            send,
+            speak: formData.get("speak") !== "false",
+          });
 
-        logEvent("voice.stream.completed", {
-          requestId,
-          sessionId: redactSessionId(sessionId),
-          durationMs: Date.now() - startedAt,
-          audioBytes: audio.size,
-          transcriptChars: transcript.length,
-          replyChars: reply.length,
-        });
+          logEvent("voice.stream.completed", {
+            requestId,
+            sessionId: redactSessionId(sessionId),
+            durationMs: Date.now() - startedAt,
+            audioBytes: audio.size,
+            transcriptChars: transcript.length,
+            replyChars: reply.length,
+          });
+        } catch (err) {
+          if (!signal.aborted) releaseBudget("voice-stream");
+          throw err;
+        }
       },
     });
   } catch (err) {

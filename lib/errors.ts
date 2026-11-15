@@ -13,6 +13,7 @@ export type ErrorCode =
   | "EMPTY_AUDIO"
   | "AUDIO_TOO_LARGE"
   | "AUDIO_TOO_LONG"
+  | "INVALID_AUDIO_DURATION"
   | "NOTHING_HEARD"
   | "STT_FAILED"
   | "LLM_FAILED"

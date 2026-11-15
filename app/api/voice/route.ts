@@ -14,7 +14,12 @@ import {
   getHistory,
 } from "@/lib/conversation";
 import { AppError } from "@/lib/errors";
-import { consumeBudget, guardRequest, rateLimitHeaders } from "@/lib/guard";
+import {
+  consumeBudget,
+  guardRequest,
+  rateLimitHeaders,
+  releaseBudget,
+} from "@/lib/guard";
 import { jsonOk, toErrorResponse } from "@/lib/http";
 import {
   errorMessage,
@@ -38,7 +43,9 @@ export async function POST(request: NextRequest) {
     );
     const audio = formData.get("audio");
     const sessionId = resolveSessionId(formData.get("session_id"));
-    const duration = Number(formData.get("audio_duration"));
+    const durationRaw = formData.get("audio_duration");
+    const duration =
+      typeof durationRaw === "string" ? Number(durationRaw) : Number.NaN;
     const speak = formData.get("speak") !== "false";
 
     if (!(audio instanceof File) || audio.size === 0) {
@@ -51,7 +58,19 @@ export async function POST(request: NextRequest) {
         413,
       );
     }
-    if (Number.isFinite(duration) && duration > config.maxAudioSeconds) {
+    if (
+      typeof durationRaw !== "string" ||
+      durationRaw.trim() === "" ||
+      !Number.isFinite(duration) ||
+      duration < 0
+    ) {
+      throw new AppError(
+        "INVALID_AUDIO_DURATION",
+        "audio_duration is required and must be a non-negative number of seconds",
+        400,
+      );
+    }
+    if (duration > config.maxAudioSeconds) {
       throw new AppError(
         "AUDIO_TOO_LONG",
         `Audio exceeds ${config.maxAudioSeconds}s limit`,
@@ -60,14 +79,27 @@ export async function POST(request: NextRequest) {
     }
 
     consumeBudget("voice");
-    const transcript = (await transcribeAudio(audio)).trim();
+    let transcript: string;
+    try {
+      transcript = (await transcribeAudio(audio, request.signal)).trim();
+    } catch (err) {
+      releaseBudget("voice");
+      throw err;
+    }
     if (!transcript) {
+      releaseBudget("voice");
       throw new AppError("NOTHING_HEARD", "No speech detected in audio", 400);
     }
 
-    const reply = await generateResponse(
-      buildRequestMessages(sessionId, transcript),
-    );
+    let reply: string;
+    try {
+      reply = await generateResponse(
+        buildRequestMessages(sessionId, transcript),
+      );
+    } catch (err) {
+      releaseBudget("voice");
+      throw err;
+    }
     appendTurn(sessionId, transcript, reply);
 
     let audioB64: string | null = null;

@@ -9,7 +9,12 @@ import {
   getHistory,
 } from "@/lib/conversation";
 import { AppError } from "@/lib/errors";
-import { consumeBudget, guardRequest, rateLimitHeaders } from "@/lib/guard";
+import {
+  consumeBudget,
+  guardRequest,
+  rateLimitHeaders,
+  releaseBudget,
+} from "@/lib/guard";
 import { jsonOk, toErrorResponse } from "@/lib/http";
 import {
   errorMessage,
@@ -49,7 +54,15 @@ export async function POST(request: NextRequest) {
 
     const sessionId = resolveSessionId(body?.session_id);
     consumeBudget("chat");
-    const reply = await generateResponse(buildRequestMessages(sessionId, message));
+    let reply: string;
+    try {
+      reply = await generateResponse(
+        buildRequestMessages(sessionId, message),
+      );
+    } catch (err) {
+      releaseBudget("chat");
+      throw err;
+    }
     appendTurn(sessionId, message, reply);
 
     let audio: string | null = null;

@@ -4,7 +4,12 @@ import { ensureAiConfigured } from "@/lib/ai";
 import { readJson } from "@/lib/body";
 import { config } from "@/lib/config";
 import { AppError } from "@/lib/errors";
-import { consumeBudget, guardRequest, rateLimitHeaders } from "@/lib/guard";
+import {
+  consumeBudget,
+  guardRequest,
+  rateLimitHeaders,
+  releaseBudget,
+} from "@/lib/guard";
 import { toErrorResponse } from "@/lib/http";
 import { logEvent, redactSessionId } from "@/lib/logger";
 import { sseResponse } from "@/lib/sse-response";
@@ -48,22 +53,27 @@ export async function POST(request: NextRequest) {
       run: async (send, signal) => {
         send("session", { session_id: sessionId });
 
-        const reply = await streamTurn({
-          sessionId,
-          userContent: message,
-          requestId,
-          signal,
-          send,
-          speak: body?.speak !== false,
-        });
+        try {
+          const reply = await streamTurn({
+            sessionId,
+            userContent: message,
+            requestId,
+            signal,
+            send,
+            speak: body?.speak !== false,
+          });
 
-        logEvent("chat.stream.completed", {
-          requestId,
-          sessionId: redactSessionId(sessionId),
-          durationMs: Date.now() - startedAt,
-          messageChars: message.length,
-          replyChars: reply.length,
-        });
+          logEvent("chat.stream.completed", {
+            requestId,
+            sessionId: redactSessionId(sessionId),
+            durationMs: Date.now() - startedAt,
+            messageChars: message.length,
+            replyChars: reply.length,
+          });
+        } catch (err) {
+          if (!signal.aborted) releaseBudget("chat-stream");
+          throw err;
+        }
       },
     });
   } catch (err) {
