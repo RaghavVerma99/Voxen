@@ -36,13 +36,19 @@ function client(): OpenAI {
   return clientInstance;
 }
 
-export async function transcribeAudio(file: File): Promise<string> {
+export async function transcribeAudio(
+  file: File,
+  signal?: AbortSignal,
+): Promise<string> {
   try {
-    const result = await client().audio.transcriptions.create({
-      model: config.sttModel,
-      file,
-      response_format: "text",
-    });
+    const result = await client().audio.transcriptions.create(
+      {
+        model: config.sttModel,
+        file,
+        response_format: "text",
+      },
+      { signal },
+    );
     return result.trim();
   } catch (err) {
     throw new AppError("STT_FAILED", errorMessage(err), 502);
@@ -126,25 +132,157 @@ export async function generateResponse(messages: LlmMessage[]): Promise<string> 
   throw new AppError("LLM_FAILED", "Tool loop exceeded maximum iterations", 502);
 }
 
+interface PendingToolCall {
+  id: string;
+  type: "function";
+  function: { name: string; arguments: string };
+}
+
+export interface StreamHandlers {
+  onDelta: (text: string) => void;
+  signal?: AbortSignal;
+}
+
+/**
+ * Streams the model's text while preserving the same bounded tool loop as
+ * generateResponse. Tool calls are accumulated from deltas, executed
+ * concurrently, then the model continues with the tool results.
+ */
+export async function streamResponse(
+  messages: LlmMessage[],
+  handlers: StreamHandlers,
+): Promise<string> {
+  const request: LlmMessage[] = messages.slice();
+  let fullText = "";
+
+  for (let round = 0; round <= config.maxToolRounds; round += 1) {
+    let completion;
+    try {
+      completion = await client().chat.completions.create(
+        {
+          model: config.llmModel,
+          messages: request as ChatCompletionMessageParam[],
+          tools: TOOL_SCHEMAS,
+          max_tokens: config.maxReplyTokens,
+          stream: true,
+        },
+        { signal: handlers.signal },
+      );
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      throw new AppError("LLM_FAILED", errorMessage(err), 502);
+    }
+
+    let roundText = "";
+    const pending = new Map<number, PendingToolCall>();
+
+    try {
+      for await (const chunk of completion) {
+        const delta = chunk.choices[0]?.delta;
+        if (!delta) continue;
+
+        if (delta.content) {
+          roundText += delta.content;
+          fullText += delta.content;
+          handlers.onDelta(delta.content);
+        }
+
+        for (const call of delta.tool_calls ?? []) {
+          const current = pending.get(call.index) ?? {
+            id: "",
+            type: "function" as const,
+            function: { name: "", arguments: "" },
+          };
+          if (call.id) current.id = call.id;
+          if (call.function?.name) current.function.name += call.function.name;
+          if (call.function?.arguments) {
+            current.function.arguments += call.function.arguments;
+          }
+          pending.set(call.index, current);
+        }
+      }
+    } catch (err) {
+      if (isAbortError(err)) throw err;
+      throw new AppError("LLM_FAILED", errorMessage(err), 502);
+    }
+
+    const calls = [...pending.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([, call]) => call)
+      .filter((call) => call.function.name);
+
+    if (calls.length === 0) {
+      const text = fullText.trim();
+      if (text) return text;
+      const fallback = "I didn't quite catch that. Could you say it again?";
+      handlers.onDelta(fallback);
+      return fallback;
+    }
+
+    const assistantMessage: LlmMessage = {
+      role: "assistant",
+      tool_calls: calls.map((call, index) => ({
+        id: call.id || `call-${round}-${index}`,
+        type: "function",
+        function: {
+          name: call.function.name,
+          arguments: call.function.arguments,
+        },
+      })),
+    };
+    if (roundText) assistantMessage.content = roundText;
+    request.push(assistantMessage);
+
+    const outputs = await Promise.all(
+      calls.map(async (call, index) => ({
+        id: call.id || `call-${round}-${index}`,
+        output: await runTool(
+          call.function.name,
+          call.function.arguments || "{}",
+        ),
+      })),
+    );
+    for (const { id, output } of outputs) {
+      request.push({ role: "tool", tool_call_id: id, content: output });
+    }
+  }
+
+  throw new AppError("LLM_FAILED", "Tool loop exceeded maximum iterations", 502);
+}
+
+function isAbortError(err: unknown): boolean {
+  return (
+    err instanceof Error &&
+    (err.name === "AbortError" || err.name === "APIUserAbortError")
+  );
+}
+
 const TTS_MAX_INPUT_CHARS = 4_000;
 
-export async function synthesizeSpeech(text: string): Promise<string> {
+export async function synthesizeSpeech(
+  text: string,
+  signal?: AbortSignal,
+): Promise<string> {
   const input =
     text.length > TTS_MAX_INPUT_CHARS
       ? `${text.slice(0, TTS_MAX_INPUT_CHARS - 3)}...`
       : text;
 
   try {
-    const response = await client().audio.speech.create({
-      model: config.ttsModel,
-      voice: config.ttsVoice,
-      response_format: "mp3",
-      input,
-    });
+    const response = await client().audio.speech.create(
+      {
+        model: config.ttsModel,
+        voice: config.ttsVoice,
+        response_format: "mp3",
+        input,
+      },
+      { signal },
+    );
     const audio = await response.arrayBuffer();
     return Buffer.from(audio).toString("base64");
   } catch (err) {
     // TTS is best-effort: callers degrade to text-only replies.
+    if (isAbortError(err)) throw err;
     logWarning("tts.failed", { message: errorMessage(err) });
     throw new AppError("TTS_FAILED", errorMessage(err), 502);
   }

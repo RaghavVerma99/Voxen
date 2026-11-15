@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
 import { ensureAiConfigured, generateResponse, synthesizeSpeech } from "@/lib/ai";
+import { readJson } from "@/lib/body";
 import { config } from "@/lib/config";
 import {
   appendTurn,
@@ -8,9 +9,14 @@ import {
   getHistory,
 } from "@/lib/conversation";
 import { AppError } from "@/lib/errors";
-import { consumeBudget, guardRequest } from "@/lib/guard";
+import { consumeBudget, guardRequest, rateLimitHeaders } from "@/lib/guard";
 import { jsonOk, toErrorResponse } from "@/lib/http";
-import { errorMessage, logEvent, logWarning } from "@/lib/logger";
+import {
+  errorMessage,
+  logEvent,
+  logWarning,
+  redactSessionId,
+} from "@/lib/logger";
 import { resolveSessionId } from "@/lib/validate";
 
 interface ChatBody {
@@ -24,10 +30,10 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now();
 
   try {
-    guardRequest(request, "chat");
+    const limits = guardRequest(request, "chat");
     ensureAiConfigured();
 
-    const body = (await request.json().catch(() => null)) as ChatBody | null;
+    const body = await readJson<ChatBody>(request, config.maxChatRequestBytes);
     const message = typeof body?.message === "string" ? body.message.trim() : "";
 
     if (!message) {
@@ -60,7 +66,7 @@ export async function POST(request: NextRequest) {
 
     logEvent("chat.completed", {
       requestId,
-      sessionId,
+      sessionId: redactSessionId(sessionId),
       durationMs: Date.now() - startedAt,
       messageChars: message.length,
       spoken: audio !== null,
@@ -74,6 +80,8 @@ export async function POST(request: NextRequest) {
         history: getHistory(sessionId),
       },
       requestId,
+      200,
+      rateLimitHeaders(limits),
     );
   } catch (err) {
     return toErrorResponse(err, requestId);
