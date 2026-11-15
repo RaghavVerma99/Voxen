@@ -10,6 +10,17 @@ interface UseRecorderOptions {
   onError: (message: string) => void;
 }
 
+interface RecordingTurn {
+  recorder: MediaRecorder;
+  stream: MediaStream;
+  chunks: Blob[];
+  mime: string;
+  startedAt: number;
+  durationSeconds: number;
+  discard: boolean;
+  finalized: boolean;
+}
+
 function pickMimeType(): string | null {
   if (typeof MediaRecorder === "undefined") return null;
   if (typeof MediaRecorder.isTypeSupported !== "function") return null;
@@ -27,13 +38,9 @@ export function useRecorder(options: UseRecorderOptions) {
   const [elapsed, setElapsed] = useState(0);
   const [micSupported, setMicSupported] = useState(true);
 
-  const recorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const chunksRef = useRef<Blob[]>([]);
-  const mimeRef = useRef("audio/webm");
-  const startedAtRef = useRef(0);
-  const durationRef = useRef(0);
-  const discardRef = useRef(false);
+  const turnRef = useRef<RecordingTurn | null>(null);
+  // Invalidates an in-flight getUserMedia() when the user cancels early.
+  const requestRef = useRef(0);
   const intervalRef = useRef<number | null>(null);
   const autoStopRef = useRef<number | null>(null);
   const finishRef = useRef<(discard: boolean) => void>(() => {});
@@ -58,55 +65,75 @@ export function useRecorder(options: UseRecorderOptions) {
     }
   }, []);
 
-  const stopStream = useCallback(() => {
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
+  const releaseTurn = useCallback((turn: RecordingTurn) => {
+    // Tracks are stopped only after the recorder has emitted its final
+    // `dataavailable` event, otherwise the last chunk can be clipped.
+    turn.stream.getTracks().forEach((track) => track.stop());
+    if (turnRef.current === turn) turnRef.current = null;
   }, []);
 
-  const onRecordingStopped = useCallback(() => {
-    stopStream();
-    const mime = mimeRef.current;
-    const chunks = chunksRef.current;
-    chunksRef.current = [];
-    recorderRef.current = null;
+  const finalize = useCallback(
+    (turn: RecordingTurn) => {
+      if (turn.finalized) return;
+      turn.finalized = true;
+      clearTimers();
+      releaseTurn(turn);
 
-    if (discardRef.current) {
-      discardRef.current = false;
-      return;
-    }
+      if (turn.discard) return;
 
-    const blob = new Blob(chunks, { type: mime });
-    if (blob.size === 0) {
-      onErrorRef.current("No audio was captured. Try again.");
-      return;
-    }
+      const blob = new Blob(turn.chunks, { type: turn.mime });
+      if (blob.size === 0) {
+        onErrorRef.current("No audio was captured. Try again.");
+        return;
+      }
 
-    onCompleteRef.current(blob, mime, durationRef.current);
-  }, [stopStream]);
+      onCompleteRef.current(blob, turn.mime, turn.durationSeconds);
+    },
+    [clearTimers, releaseTurn],
+  );
 
   const finish = useCallback(
     (discard: boolean) => {
-      const recorder = recorderRef.current;
-      durationRef.current = Math.max(
+      const turn = turnRef.current;
+      if (!turn) {
+        // Cancel a getUserMedia() call that has not produced a recorder yet.
+        requestRef.current += 1;
+        return;
+      }
+
+      turn.discard = discard;
+      turn.durationSeconds = Math.max(
         0,
-        (Date.now() - startedAtRef.current) / 1000,
+        (Date.now() - turn.startedAt) / 1000,
       );
       clearTimers();
       setElapsed(0);
       setRecording(false);
-      discardRef.current = discard;
 
-      if (recorder && recorder.state !== "inactive") recorder.stop();
-      else recorderRef.current = null;
-      stopStream();
+      if (turn.recorder.state === "inactive") {
+        finalize(turn);
+        return;
+      }
+
+      // The stop event delivers the last chunk before finalization. The
+      // fallback timer only matters if the browser never fires it.
+      try {
+        turn.recorder.stop();
+        autoStopRef.current = window.setTimeout(() => finalize(turn), 2_000);
+      } catch {
+        finalize(turn);
+      }
     },
-    [clearTimers, stopStream],
+    [clearTimers, finalize],
   );
 
   finishRef.current = finish;
 
   const start = useCallback(async () => {
-    if (disabledRef.current || recorderRef.current) return;
+    if (disabledRef.current || turnRef.current) return;
+
+    const token = requestRef.current + 1;
+    requestRef.current = token;
     onStartRef.current?.();
 
     let stream: MediaStream;
@@ -125,6 +152,11 @@ export function useRecorder(options: UseRecorderOptions) {
       return;
     }
 
+    if (token !== requestRef.current) {
+      stream.getTracks().forEach((track) => track.stop());
+      return;
+    }
+
     const mime = pickMimeType();
     let recorder: MediaRecorder;
     try {
@@ -137,30 +169,45 @@ export function useRecorder(options: UseRecorderOptions) {
       return;
     }
 
-    streamRef.current = stream;
-    recorderRef.current = recorder;
-    mimeRef.current = recorder.mimeType || mime || "audio/webm";
-    chunksRef.current = [];
-    discardRef.current = false;
-    startedAtRef.current = Date.now();
+    const turn: RecordingTurn = {
+      recorder,
+      stream,
+      chunks: [],
+      mime: recorder.mimeType || mime || "audio/webm",
+      startedAt: Date.now(),
+      durationSeconds: 0,
+      discard: false,
+      finalized: false,
+    };
+    turnRef.current = turn;
 
+    // Each turn owns its chunks and duration, so a late event from an old
+    // recorder can never leak audio into the next recording.
     recorder.addEventListener("dataavailable", (event) => {
-      if (event.data.size > 0) chunksRef.current.push(event.data);
+      if (event.data.size > 0) turn.chunks.push(event.data);
     });
-    recorder.addEventListener("stop", onRecordingStopped, { once: true });
+    recorder.addEventListener("stop", () => finalize(turn), { once: true });
 
-    recorder.start(250);
+    try {
+      recorder.start(250);
+    } catch {
+      turn.discard = true;
+      finalize(turn);
+      onErrorRef.current("This browser cannot record audio.");
+      return;
+    }
+
     setElapsed(0);
     setRecording(true);
 
     intervalRef.current = window.setInterval(() => {
-      setElapsed((Date.now() - startedAtRef.current) / 1000);
+      setElapsed((Date.now() - turn.startedAt) / 1000);
     }, 200);
     autoStopRef.current = window.setTimeout(
       () => finishRef.current(false),
       options.maxSeconds * 1000,
     );
-  }, [onRecordingStopped, options.maxSeconds]);
+  }, [finalize, options.maxSeconds]);
 
   const stop = useCallback(() => finish(false), [finish]);
   const cancel = useCallback(() => finish(true), [finish]);
@@ -175,13 +222,23 @@ export function useRecorder(options: UseRecorderOptions) {
 
   useEffect(() => {
     return () => {
-      discardRef.current = true;
+      requestRef.current += 1;
       clearTimers();
-      const recorder = recorderRef.current;
-      if (recorder && recorder.state !== "inactive") recorder.stop();
-      stopStream();
+      const turn = turnRef.current;
+      if (!turn) return;
+
+      turn.discard = true;
+      if (turn.recorder.state !== "inactive") {
+        try {
+          turn.recorder.stop();
+        } catch {
+          finalize(turn);
+        }
+      } else {
+        finalize(turn);
+      }
     };
-  }, [clearTimers, stopStream]);
+  }, [clearTimers, finalize]);
 
   return { recording, elapsed, micSupported, start, stop, cancel };
 }
