@@ -98,7 +98,6 @@ Turns for one session are serialized, so a retry or a second tab cannot read sta
 | Search | Tavily (if configured) or keyless DuckDuckGo Lite + cheerio |
 | Transport | Server-Sent Events for streaming, JSON for fallbacks |
 | Tests | Vitest (route contracts + units, no network) |
-| Deploy | Docker (`output: "standalone"`), Render/Fly, or Vercel |
 
 ---
 
@@ -332,66 +331,6 @@ Tests need **no API key and no network**. The AI provider is mocked, the tool lo
 - provider switching, tool-loop bounds, and failure mapping
 
 CI runs typecheck, tests, and a production build on every push and PR (`.github/workflows/ci.yml`).
-
----
-
-## Deployment
-
-### Docker (recommended)
-
-```bash
-docker build -t voxen .
-docker run --rm -p 3000:3000 \
-  -e OPENAI_API_KEY=sk-… \
-  -e ACCESS_CODE=replace-with-a-16-plus-character-secret \
-  -e TAVILY_API_KEY=tvly-… \
-  voxen
-```
-
-The image runs with `NODE_ENV=production`, so `ACCESS_CODE` is required by default; the container reports not-ready and refuses paid traffic without it. To run a deliberately public container, add `-e REQUIRE_ACCESS_CODE=false`.
-
-The multi-stage build copies only the standalone server output into a non-root `node:22-alpine` runtime. The container healthcheck calls `/api/ready`.
-
-### Render / Fly / Railway
-
-- Build: `npm ci && npm run build`
-- Start: `npm start` (copies static assets, then launches the standalone server)
-- Liveness: `/api/health` · Readiness: `/api/ready`
-- Set `OPENAI_API_KEY` and a production `ACCESS_CODE` of 16+ characters (plus optionally `TAVILY_API_KEY`). Without the code, the app fails closed.
-- `TRUST_PROXY_HOPS` auto-detects to `1` on Render and Fly. Railway does **not** set a recognized marker, so set `TRUST_PROXY_HOPS=1` there explicitly. Add another hop if you put your own proxy in front.
-
-### Deploy to Render (one-click blueprint)
-
-The repo ships a [`render.yaml`](render.yaml) blueprint that builds and runs the Docker image and wires the health check:
-
-- **Runtime:** Docker (`Dockerfile`)
-- **Health check:** `GET /api/ready`
-- **Plan:** starter
-
-To deploy:
-
-1. Push this repo to GitHub (branch `main`).
-2. In Render: **New → Blueprint → select the repo → Apply**.
-3. When prompted (or later under the service's **Environment** tab), set:
-   - `OPENAI_API_KEY` — your OpenAI key (secret)
-   - `ACCESS_CODE` — your own 16+ character access secret (secret)
-   - `TAVILY_API_KEY` — optional (secret)
-4. Deploy. Render runs the Docker build, starts the standalone server, and waits on `/api/ready`.
-
-> Secrets are stored in Render's encrypted secret store; the blueprint only references them (`sync: false`), so nothing secret is committed to the repo.
-
-### Vercel
-
-Import the repo, use the Next.js preset, and set the env vars. Note:
-
-- Serverless request bodies are ~4.5 MB; the default audio cap is 4 MB.
-- SSE works, but sessions, rate limits, the daily budget, and session locks are per instance. Use a shared store before scaling or treating the budget as a hard cap.
-- `TRUST_PROXY_HOPS` defaults to `1` on Vercel.
-- Set `ACCESS_CODE` (16+ characters) or production requests return `503 CONFIG_ERROR`.
-
-### Access gate
-
-Set `ACCESS_CODE` to a long random value. The UI asks for it once, stores it in `localStorage`, and sends it as `x-access-code`. In production the gate is mandatory unless you explicitly set `REQUIRE_ACCESS_CODE=false`; this is what keeps a misconfigured public deploy from spending your OpenAI budget.
 
 ---
 
