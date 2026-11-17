@@ -1,0 +1,34 @@
+# Render Blueprint for Voxen
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Deploy: push this file to your repo's default branch, then in Render:
+#   New -> Blueprint -> select repo -> apply.
+#
+# Required (set in the Render dashboard when prompted, or under a Web Service's
+# Environment tab). Secrets are stored in Render's encrypted secret store:
+#   OPENAI_API_KEY  - your OpenAI key (sk-...). Server-side only; never exposed.
+#   ACCESS_CODE     - your own 16+ character secret. Production fails closed
+#                    without a valid gate; the UI collects it from visitors.
+# Optional:
+#   TAVILY_API_KEY  - Tavily for production-grade web search (falls back to
+#                    keyless DuckDuckGo when unset).
+
+services:
+  - type: web
+    name: voxen
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/ready
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 10000
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: ACCESS_CODE
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false

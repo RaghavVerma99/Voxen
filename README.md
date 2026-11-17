@@ -360,6 +360,26 @@ The multi-stage build copies only the standalone server output into a non-root `
 - Set `OPENAI_API_KEY` and a production `ACCESS_CODE` of 16+ characters (plus optionally `TAVILY_API_KEY`). Without the code, the app fails closed.
 - `TRUST_PROXY_HOPS` auto-detects to `1` on Render and Fly. Railway does **not** set a recognized marker, so set `TRUST_PROXY_HOPS=1` there explicitly. Add another hop if you put your own proxy in front.
 
+### Deploy to Render (one-click blueprint)
+
+The repo ships a [`render.yaml`](render.yaml) blueprint that builds and runs the Docker image and wires the health check:
+
+- **Runtime:** Docker (`Dockerfile`)
+- **Health check:** `GET /api/ready`
+- **Plan:** starter
+
+To deploy:
+
+1. Push this repo to GitHub (branch `main`).
+2. In Render: **New → Blueprint → select the repo → Apply**.
+3. When prompted (or later under the service's **Environment** tab), set:
+   - `OPENAI_API_KEY` — your OpenAI key (secret)
+   - `ACCESS_CODE` — your own 16+ character access secret (secret)
+   - `TAVILY_API_KEY` — optional (secret)
+4. Deploy. Render runs the Docker build, starts the standalone server, and waits on `/api/ready`.
+
+> Secrets are stored in Render's encrypted secret store; the blueprint only references them (`sync: false`), so nothing secret is committed to the repo.
+
 ### Vercel
 
 Import the repo, use the Next.js preset, and set the env vars. Note:
