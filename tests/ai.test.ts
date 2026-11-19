@@ -6,6 +6,51 @@ const provider = vi.hoisted(() => ({
   createTranscription: vi.fn(),
 }));
 
+const wsState = vi.hoisted(() => ({ instances: [] as Array<Record<string, unknown>> }));
+
+vi.mock("ws", () => ({
+  default: class FakeWebSocket {
+    handlers: Record<string, Array<(...args: unknown[]) => void>> = {};
+    sent: string[] = [];
+    readyState = 1;
+    url: string;
+    options: { headers?: Record<string, string> };
+
+    constructor(url: string, options?: { headers?: Record<string, string> }) {
+      this.url = url;
+      this.options = options ?? {};
+      wsState.instances.push(this as unknown as Record<string, unknown>);
+    }
+
+    on(event: string, listener: (...args: unknown[]) => void): void {
+      this.handlers[event] = [...(this.handlers[event] ?? []), listener];
+    }
+
+    off(event: string, listener: (...args: unknown[]) => void): void {
+      this.handlers[event] = (this.handlers[event] ?? []).filter(
+        (candidate) => candidate !== listener,
+      );
+    }
+
+    send(data: string): void {
+      this.sent.push(data);
+    }
+
+    close(): void {
+      this.readyState = 3;
+      for (const listener of [...(this.handlers["close"] ?? [])]) {
+        listener(1000, Buffer.alloc(0), true);
+      }
+    }
+
+    emit(event: string, ...args: unknown[]): void {
+      for (const listener of [...(this.handlers[event] ?? [])]) {
+        listener(...args);
+      }
+    }
+  },
+}));
+
 vi.mock("openai", () => ({
   default: vi.fn(function OpenAI() {
     return {
@@ -23,6 +68,7 @@ import {
   synthesizeSpeech,
   transcribeAudio,
 } from "@/lib/ai";
+import { synthesizeSpeechRealtime } from "@/lib/realtime-tts";
 import { config } from "@/lib/config";
 import { AppError } from "@/lib/errors";
 
@@ -54,6 +100,7 @@ beforeEach(() => {
   config.openaiApiKey = "test-key";
   config.maxToolRounds = 4;
   config.searchProvider = "duckduckgo";
+  config.ttsProvider = "speech";
 });
 
 describe("transcribeAudio", () => {
@@ -207,6 +254,22 @@ describe("synthesizeSpeech", () => {
     await expect(synthesizeSpeech("hello")).resolves.toBe("AQID");
   });
 
+  it("requests a WAV container from the speech provider", async () => {
+    provider.createSpeech.mockResolvedValue({
+      arrayBuffer: async () => new Uint8Array([1, 2, 3]).buffer,
+    });
+
+    await synthesizeSpeech("hello");
+
+    const request = provider.createSpeech.mock.calls[0][0] as {
+      model?: string;
+      voice?: string;
+      response_format?: string;
+      input?: string;
+    };
+    expect(request.response_format).toBe("wav");
+  });
+
   it("truncates input to the provider limit", async () => {
     provider.createSpeech.mockResolvedValue({
       arrayBuffer: async () => new ArrayBuffer(2),
@@ -218,5 +281,70 @@ describe("synthesizeSpeech", () => {
       .input;
     expect(input.length).toBeLessThanOrEqual(4_000);
     expect(input.endsWith("...")).toBe(true);
+  });
+});
+
+describe("synthesizeSpeechRealtime", () => {
+  it("migrates narration to the realtime TTS model and returns WAV audio", async () => {
+    config.ttsProvider = "realtime";
+
+    const audioPromise = synthesizeSpeechRealtime("Hello there.");
+    const instance = wsState.instances[wsState.instances.length - 1] as {
+      sent: string[];
+      handlers: Record<string, Array<(event: unknown, ...args: unknown[]) => void>>;
+      emit: (event: string, ...args: unknown[]) => void;
+      close: () => void;
+    };
+
+    instance.emit(
+      "message",
+      Buffer.from(JSON.stringify({ type: "session.created" })),
+    );
+    instance.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "response.output_audio.delta",
+          delta: Buffer.from([1, 2, 3, 4]).toString("base64"),
+        }),
+      ),
+    );
+    instance.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "response.done",
+          response: { status: "completed" },
+        }),
+      ),
+    );
+
+    const audio = await audioPromise;
+
+    expect(instance.sent[0]).toContain('"type":"session.update"');
+    expect(instance.sent[0]).toContain('"output_modalities":["audio"]');
+    expect(instance.sent[1]).toContain('"type":"conversation.item.create"');
+    expect(instance.sent[1]).toContain('"input_text"');
+    expect(instance.sent[2]).toContain('"type":"response.create"');
+    expect(instance.sent[2]).toContain('"output_modalities":["audio"]');
+
+    const wav = Buffer.from(audio, "base64");
+    expect(wav.subarray(0, 4).toString("ascii")).toBe("RIFF");
+    expect(wav.subarray(8, 12).toString("ascii")).toBe("WAVE");
+  });
+
+  it("maps realtime failures to TTS_FAILED", async () => {
+    config.ttsProvider = "realtime";
+
+    const audioPromise = synthesizeSpeechRealtime("Hello there.");
+    const instance = wsState.instances[wsState.instances.length - 1] as {
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+    instance.emit("error", new Error("realtime down"));
+
+    await expect(audioPromise).rejects.toMatchObject({
+      code: "TTS_FAILED",
+      status: 502,
+    });
   });
 });

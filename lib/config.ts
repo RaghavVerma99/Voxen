@@ -6,6 +6,8 @@ function toNumber(value: string | undefined, fallback: number): number {
 
 export type SearchProvider = "auto" | "tavily" | "duckduckgo";
 
+export type TtsProvider = "speech" | "realtime";
+
 function toSearchProvider(value: string | undefined): SearchProvider {
   const normalized = (value ?? "").trim().toLowerCase();
   if (normalized === "tavily" || normalized === "duckduckgo") return normalized;
@@ -76,8 +78,17 @@ export const config = {
   llmReasoningEffort: toReasoningEffort(
     process.env.LLM_REASONING_EFFORT ?? "none",
   ),
+  // The Speech API is deprecated (gpt-4o-mini-tts shuts down January 6, 2027);
+  // narration now runs through the Realtime API. Set TTS_PROVIDER=speech to keep
+  // the legacy text-to-speech path during the migration window.
+  ttsProvider: (process.env.TTS_PROVIDER?.trim().toLowerCase() === "speech"
+    ? "speech"
+    : "realtime") as TtsProvider,
   ttsModel: process.env.TTS_MODEL ?? "gpt-4o-mini-tts",
   ttsVoice: process.env.TTS_VOICE ?? "alloy",
+  realtimeTtsModel: process.env.REALTIME_TTS_MODEL ?? "gpt-realtime-2.1-mini",
+  realtimeTtsVoice: process.env.REALTIME_TTS_VOICE ?? "marin",
+  realtimeTtsInstructions: process.env.REALTIME_TTS_INSTRUCTIONS ?? "Speak clearly and warmly. Keep answers concise and easy to follow.",
   maxToolRounds: toNumber(process.env.MAX_TOOL_ROUNDS, 4),
   maxReplyTokens: toNumber(process.env.MAX_REPLY_TOKENS, 600),
   openaiTimeoutMs: toNumber(process.env.OPENAI_TIMEOUT_MS, 30_000),
