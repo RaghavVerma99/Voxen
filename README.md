@@ -94,7 +94,7 @@ Turns for one session are serialized, so a retry or a second tab cannot read sta
 | Language | TypeScript (strict) |
 | STT | OpenAI `gpt-transcribe` (JSON transcript) |
 | LLM | OpenAI `gpt-6-luna` with streaming and function calling |
-| TTS | OpenAI `gpt-4o-mini-tts` (Speech API) |
+| TTS | OpenAI Realtime `gpt-realtime-2.1-mini` (speech migration) |
 | Search | Tavily (if configured) or keyless DuckDuckGo Lite + cheerio |
 | Transport | Server-Sent Events for streaming, JSON for fallbacks |
 | Tests | Vitest (route contracts + units, no network) |
@@ -138,8 +138,12 @@ Next.js loads `.env` automatically for `dev`, `build`, and `start`. On a host, s
 | `STT_MODEL` | `gpt-transcribe` | JSON transcription; the app reads `.text` |
 | `LLM_MODEL` | `gpt-6-luna` | Chat Completions + tools |
 | `LLM_REASONING_EFFORT` | `none` | Required for tools on `gpt-6-luna`; set `default`, `off`, or empty to omit the field |
-| `TTS_MODEL` | `gpt-4o-mini-tts` | Speech API |
-| `TTS_VOICE` | `alloy` | |
+| `TTS_PROVIDER` | `realtime` | `realtime` (default) or `speech` (legacy migration window) |
+| `REALTIME_TTS_MODEL` | `gpt-realtime-2.1-mini` | Realtime model used for narration |
+| `REALTIME_TTS_VOICE` | `marin` | Realtime voice for narration |
+| `REALTIME_TTS_INSTRUCTIONS` | see `lib/config.ts` | Narration instructions for the realtime session |
+| `TTS_MODEL` | `gpt-4o-mini-tts` | Legacy Speech API model; only used when `TTS_PROVIDER=speech` |
+| `TTS_VOICE` | `alloy` | Voice for the legacy speech path |
 | `MAX_TOOL_ROUNDS` | `4` | |
 | `MAX_REPLY_TOKENS` | `600` | Sent as `max_completion_tokens` |
 | `OPENAI_TIMEOUT_MS` | `30000` | |
@@ -147,7 +151,7 @@ Next.js loads `.env` automatically for `dev`, `build`, and `start`. On a host, s
 
 `gpt-6-luna` supports Chat Completions function calling only with `reasoning_effort: "none"`, which is why reasoning is disabled by default. If you swap in another model, either leave `LLM_REASONING_EFFORT` empty to omit the parameter or set an effort that model accepts.
 
-> **Model lifecycle:** the Speech API models (`gpt-4o-mini-tts`, `tts-1`, `tts-1-hd`) shut down on **January 6, 2027**. OpenAI has no drop-in `/v1/audio/speech` replacement; the migration target is `gpt-realtime-2.1-mini` over the Realtime API, which is a different transport and workflow. Voxen keeps the stable Speech API path for now. If you override the defaults, note that `gpt-4o-mini` shuts down on **January 14, 2027** and `gpt-4o-mini-transcribe` on **February 26, 2027**.
+> **Model lifecycle:** the Speech API models (`gpt-4o-mini-tts`, `tts-1`, `tts-1-hd`) shut down on **January 6, 2027**. OpenAI has no drop-in `/v1/audio/speech` replacement; the migration target is `gpt-realtime-2.1-mini` over the Realtime API, which is a different transport and workflow. Voxen now narrates through the Realtime API by default (`TTS_PROVIDER=realtime`): each sentence opens a Realtime session, sends the text as an input message, streams base64 PCM audio back, and returns it wrapped in a WAV container. The legacy Speech API path stays available behind `TTS_PROVIDER=speech` during the migration window. If you override the defaults, note that `gpt-4o-mini` shuts down on **January 14, 2027** and `gpt-4o-mini-transcribe` on **February 26, 2027**.
 
 ### Search
 

@@ -61,7 +61,7 @@ export function useAudioQueue() {
   const playOne = useCallback(
     (base64: string): Promise<boolean> =>
       new Promise((resolve) => {
-        const audio = new Audio(`data:audio/mpeg;base64,${base64}`);
+        const audio = new Audio(`data:audio/wav;base64,${base64}`);
         audioRef.current = audio;
 
         let settled = false;

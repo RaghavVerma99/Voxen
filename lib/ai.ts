@@ -9,6 +9,7 @@ import { config } from "./config";
 import { AppError } from "./errors";
 import { errorMessage, logWarning } from "./logger";
 import { TOOL_SCHEMAS, runTool } from "./tools";
+import { synthesizeSpeechRealtime } from "./realtime-tts";
 
 let clientInstance: OpenAI | null = null;
 
@@ -281,11 +282,17 @@ export async function synthesizeSpeech(
       : text;
 
   try {
+    if (config.ttsProvider === "realtime") {
+      return synthesizeSpeechRealtime(input, signal);
+    }
+
     const response = await client().audio.speech.create(
       {
         model: config.ttsModel,
         voice: config.ttsVoice,
-        response_format: "mp3",
+        // Output a WAV container so the browser can play both providers' audio
+        // with the same `<audio>` data source.
+        response_format: "wav",
         input,
       },
       { signal },
