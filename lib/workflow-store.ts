@@ -64,7 +64,9 @@ function emptyState(): PersistedState {
 }
 
 function storePath(): string {
-  return resolve(process.cwd(), config.workflowStorePath);
+  // The path is deployment configuration, not a bundler-time asset lookup.
+  // The hint keeps Turbopack from tracing the whole project into the output.
+  return resolve(/* turbopackIgnore: true */ process.cwd(), config.workflowStorePath);
 }
 
 async function readState(): Promise<PersistedState> {
