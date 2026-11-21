@@ -97,10 +97,12 @@ function toolReply(name = "search_web", args = '{"query":"latest news"}') {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  wsState.instances.length = 0;
   config.openaiApiKey = "test-key";
   config.maxToolRounds = 4;
   config.searchProvider = "duckduckgo";
   config.ttsProvider = "speech";
+  config.ttsFallbackProvider = "none";
 });
 
 describe("transcribeAudio", () => {
@@ -281,6 +283,75 @@ describe("synthesizeSpeech", () => {
       .input;
     expect(input.length).toBeLessThanOrEqual(4_000);
     expect(input.endsWith("...")).toBe(true);
+  });
+
+  it("falls back to the realtime adapter when speech fails", async () => {
+    config.ttsProvider = "speech";
+    config.ttsFallbackProvider = "realtime";
+    provider.createSpeech.mockRejectedValue(new Error("legacy down"));
+
+    const audioPromise = synthesizeSpeech("fallback please");
+    // Let the rejected primary settle so the failover adapter is entered.
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    const instance = wsState.instances[wsState.instances.length - 1] as {
+      sent: string[];
+      emit: (event: string, ...args: unknown[]) => void;
+    };
+
+    instance.emit(
+      "message",
+      Buffer.from(JSON.stringify({ type: "session.created" })),
+    );
+    instance.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "response.output_audio.delta",
+          delta: Buffer.from([1, 2, 3, 4]).toString("base64"),
+        }),
+      ),
+    );
+    instance.emit(
+      "message",
+      Buffer.from(
+        JSON.stringify({
+          type: "response.done",
+          response: { status: "completed" },
+        }),
+      ),
+    );
+
+    const audio = await audioPromise;
+    expect(provider.createSpeech).toHaveBeenCalledTimes(1);
+    expect(instance.sent[1]).toContain("fallback please");
+    expect(Buffer.from(audio, "base64").subarray(0, 4).toString("ascii")).toBe(
+      "RIFF",
+    );
+  });
+
+  it("stops after the primary when fallback is disabled", async () => {
+    config.ttsProvider = "speech";
+    config.ttsFallbackProvider = "none";
+    provider.createSpeech.mockRejectedValue(new Error("legacy down"));
+
+    await expect(synthesizeSpeech("hello")).rejects.toMatchObject({
+      code: "TTS_FAILED",
+      status: 502,
+    });
+    expect(provider.createSpeech).toHaveBeenCalledTimes(1);
+    expect(wsState.instances).toHaveLength(0);
+  });
+
+  it("does not retry a cancelled speech request", async () => {
+    config.ttsProvider = "speech";
+    config.ttsFallbackProvider = "realtime";
+    const aborted = Object.assign(new Error("cancelled"), {
+      name: "AbortError",
+    });
+    provider.createSpeech.mockRejectedValue(aborted);
+
+    await expect(synthesizeSpeech("hello")).rejects.toBe(aborted);
+    expect(wsState.instances).toHaveLength(0);
   });
 });
 

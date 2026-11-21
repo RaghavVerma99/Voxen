@@ -1,4 +1,3 @@
-import OpenAI from "openai";
 import type {
   ChatCompletionCreateParamsNonStreaming,
   ChatCompletionCreateParamsStreaming,
@@ -7,37 +6,14 @@ import type {
 } from "openai/resources/chat/completions";
 import { config } from "./config";
 import { AppError } from "./errors";
-import { errorMessage, logWarning } from "./logger";
+import { errorMessage } from "./logger";
+import { openaiClient, ensureAiConfigured } from "./openai-client";
 import { TOOL_SCHEMAS, runTool } from "./tools";
-import { synthesizeSpeechRealtime } from "./realtime-tts";
+import { synthesizeSpeech as synthesizeWithFailover } from "./tts";
 
-let clientInstance: OpenAI | null = null;
+export { ensureAiConfigured };
 
-export function ensureAiConfigured(): void {
-  if (!config.openaiApiKey.trim()) {
-    throw new AppError(
-      "CONFIG_ERROR",
-      "OPENAI_API_KEY is not configured on the server.",
-      500,
-    );
-  }
-}
-
-/**
- * One shared client per process: reusing it preserves HTTP connection pooling,
- * which matters for a latency-sensitive voice loop.
- */
-function client(): OpenAI {
-  ensureAiConfigured();
-  if (!clientInstance) {
-    clientInstance = new OpenAI({
-      apiKey: config.openaiApiKey,
-      timeout: config.openaiTimeoutMs,
-      maxRetries: config.openaiMaxRetries,
-    });
-  }
-  return clientInstance;
-}
+const client = openaiClient;
 
 export async function transcribeAudio(
   file: File,
@@ -270,39 +246,7 @@ function isAbortError(err: unknown): boolean {
   );
 }
 
-const TTS_MAX_INPUT_CHARS = 4_000;
-
-export async function synthesizeSpeech(
-  text: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  const input =
-    text.length > TTS_MAX_INPUT_CHARS
-      ? `${text.slice(0, TTS_MAX_INPUT_CHARS - 3)}...`
-      : text;
-
-  try {
-    if (config.ttsProvider === "realtime") {
-      return synthesizeSpeechRealtime(input, signal);
-    }
-
-    const response = await client().audio.speech.create(
-      {
-        model: config.ttsModel,
-        voice: config.ttsVoice,
-        // Output a WAV container so the browser can play both providers' audio
-        // with the same `<audio>` data source.
-        response_format: "wav",
-        input,
-      },
-      { signal },
-    );
-    const audio = await response.arrayBuffer();
-    return Buffer.from(audio).toString("base64");
-  } catch (err) {
-    // TTS is best-effort: callers degrade to text-only replies.
-    if (isAbortError(err)) throw err;
-    logWarning("tts.failed", { message: errorMessage(err) });
-    throw new AppError("TTS_FAILED", errorMessage(err), 502);
-  }
-}
+// Kept as a re-export so routes and tests continue to import the voice loop's
+// speech entry point from one place while the adapter itself is independently
+// testable in lib/tts.ts.
+export { synthesizeWithFailover as synthesizeSpeech };

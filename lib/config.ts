@@ -7,11 +7,25 @@ function toNumber(value: string | undefined, fallback: number): number {
 export type SearchProvider = "auto" | "tavily" | "duckduckgo";
 
 export type TtsProvider = "speech" | "realtime";
+export type TtsFallbackProvider = TtsProvider | "none";
 
 function toSearchProvider(value: string | undefined): SearchProvider {
   const normalized = (value ?? "").trim().toLowerCase();
   if (normalized === "tavily" || normalized === "duckduckgo") return normalized;
   return "auto";
+}
+
+function toTtsProvider(value: string | undefined, fallback: TtsProvider): TtsProvider {
+  const normalized = (value ?? "").trim().toLowerCase();
+  return normalized === "speech" || normalized === "realtime"
+    ? normalized
+    : fallback;
+}
+
+function toTtsFallbackProvider(value: string | undefined): TtsFallbackProvider {
+  const normalized = (value ?? "").trim().toLowerCase();
+  if (normalized === "none" || normalized === "off") return "none";
+  return toTtsProvider(value, "speech");
 }
 
 export type ReasoningEffort =
@@ -81,9 +95,10 @@ export const config = {
   // The Speech API is deprecated (gpt-4o-mini-tts shuts down January 6, 2027);
   // narration now runs through the Realtime API. Set TTS_PROVIDER=speech to keep
   // the legacy text-to-speech path during the migration window.
-  ttsProvider: (process.env.TTS_PROVIDER?.trim().toLowerCase() === "speech"
-    ? "speech"
-    : "realtime") as TtsProvider,
+  ttsProvider: toTtsProvider(process.env.TTS_PROVIDER, "realtime"),
+  // Ordered failover when the primary narrator fails. Set to "none" to stop
+  // after the primary adapter (for example, after the Speech API shutdown).
+  ttsFallbackProvider: toTtsFallbackProvider(process.env.TTS_FALLBACK_PROVIDER),
   ttsModel: process.env.TTS_MODEL ?? "gpt-4o-mini-tts",
   ttsVoice: process.env.TTS_VOICE ?? "alloy",
   realtimeTtsModel: process.env.REALTIME_TTS_MODEL ?? "gpt-realtime-2.1-mini",
