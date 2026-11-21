@@ -1,0 +1,146 @@
+[
+  {
+    "testCase": {
+      "id": "timing-first-token",
+      "dimension": "timing",
+      "prompt": "Give me a one-sentence weather summary.",
+      "maxLatencyMs": 800
+    },
+    "attempts": [
+      { "id": "t1", "latencyMs": 620, "toolCalls": [], "answer": "It is mild and clear." },
+      { "id": "t2", "latencyMs": 910, "toolCalls": [], "answer": "It is mild and clear." },
+      { "id": "t3", "latencyMs": 740, "toolCalls": [], "answer": "It is mild and clear." },
+      { "id": "t4", "latencyMs": 1200, "toolCalls": [], "answer": "It is mild and clear." },
+      { "id": "t5", "latencyMs": 680, "toolCalls": [], "answer": "It is mild and clear." }
+    ]
+  },
+  {
+    "testCase": {
+      "id": "recovery-provider-failure",
+      "dimension": "recovery",
+      "prompt": "Continue after the narrator fails.",
+      "requiredPhrases": ["sorry"]
+    },
+    "attempts": [
+      {
+        "id": "r1",
+        "latencyMs": 900,
+        "toolCalls": [],
+        "answer": "Sorry, I lost that for a moment. Here is the answer.",
+        "events": ["provider_error", "fallback", "resumed"]
+      },
+      {
+        "id": "r2",
+        "latencyMs": 860,
+        "toolCalls": [],
+        "answer": "Sorry, I lost that for a moment. Here is the answer.",
+        "events": ["provider_error"]
+      },
+      {
+        "id": "r3",
+        "latencyMs": 930,
+        "toolCalls": [],
+        "answer": "Sorry, I lost that for a moment. Here is the answer.",
+        "events": ["interruption", "resumed"]
+      },
+      {
+        "id": "r4",
+        "latencyMs": 890,
+        "toolCalls": [],
+        "answer": "Here is the answer.",
+        "events": ["provider_error", "retry"]
+      },
+      {
+        "id": "r5",
+        "latencyMs": 940,
+        "toolCalls": [],
+        "answer": "Sorry, I lost that for a moment. Here is the answer.",
+        "events": ["interruption", "retry"]
+      }
+    ]
+  },
+  {
+    "testCase": {
+      "id": "grounded-web-answer",
+      "dimension": "grounded",
+      "prompt": "What changed in AI this week?",
+      "requiredTool": "search_web",
+      "requiredPhrases": ["according to"],
+      "forbiddenPhrases": ["definitely", "I am certain"]
+    },
+    "attempts": [
+      {
+        "id": "g1",
+        "latencyMs": 1100,
+        "toolCalls": ["search_web"],
+        "answer": "According to the sources, two models shipped this week."
+      },
+      {
+        "id": "g2",
+        "latencyMs": 1050,
+        "toolCalls": [],
+        "answer": "According to my memory, two models shipped this week."
+      },
+      {
+        "id": "g3",
+        "latencyMs": 1080,
+        "toolCalls": ["search_web"],
+        "answer": "Two models definitely shipped this week."
+      },
+      {
+        "id": "g4",
+        "latencyMs": 1120,
+        "toolCalls": ["search_web"],
+        "answer": "According to the sources, a model shipped this week."
+      },
+      {
+        "id": "g5",
+        "latencyMs": 1070,
+        "toolCalls": ["search_web"],
+        "answer": "According to the sources, a model shipped this week."
+      }
+    ]
+  },
+  {
+    "testCase": {
+      "id": "grounded-booking",
+      "dimension": "grounded",
+      "prompt": "Book tomorrow at 2 PM and confirm it.",
+      "requiredTool": "schedule_appointment",
+      "requiredPhrases": ["confirmed"],
+      "forbiddenPhrases": ["guaranteed"]
+    },
+    "attempts": [
+      {
+        "id": "b1",
+        "latencyMs": 1200,
+        "toolCalls": ["schedule_appointment"],
+        "answer": "Your appointment is confirmed for 2 PM."
+      },
+      {
+        "id": "b2",
+        "latencyMs": 1180,
+        "toolCalls": [],
+        "answer": "Your appointment is confirmed for 2 PM."
+      },
+      {
+        "id": "b3",
+        "latencyMs": 1210,
+        "toolCalls": ["schedule_appointment"],
+        "answer": "It is guaranteed for 2 PM."
+      },
+      {
+        "id": "b4",
+        "latencyMs": 1250,
+        "toolCalls": ["schedule_appointment"],
+        "answer": "I could not confirm that slot."
+      },
+      {
+        "id": "b5",
+        "latencyMs": 1190,
+        "toolCalls": ["schedule_appointment"],
+        "answer": "Your appointment is confirmed for 2 PM."
+      }
+    ]
+  }
+]
