@@ -1,87 +1,102 @@
 # Voxen
 
-A browser-based **AI voice agent**: speak or type, watch the answer stream in, and hear it spoken sentence by sentence — with web search and session memory. One deployable Next.js app, no separate backend.
+Voxen is a browser-based **AI voice agent** in one deployable Next.js app. Speak or type, watch the reply stream in, and hear it spoken sentence by sentence. It includes web search, bounded session memory, a narrow persisted appointment workflow, turn telemetry, offline evals, and an opt-in full-duplex Realtime/WebRTC transport.
 
-> **Status:** v1.1 — streaming voice loop, security hardening, and production controls are in place. See [Roadmap](#roadmap) for what comes next.
+> **Status:** v1.1.0. The default SSE cascade is production-ready for a single instance; the Realtime/WebRTC path is flag-gated and intentionally off by default.
 
 ---
 
-## What it does
+## Highlights
 
-1. Tap the mic, speak naturally, and tap stop (60-second cap).
-2. The server transcribes the audio, streams the model's answer, and calls a web-search tool when freshness matters.
-3. Text appears token by token. Completed sentences are synthesized and played in order while the rest of the answer is still being written.
-4. Follow-up questions keep context. A text composer is always available.
-5. Start a new session at any time for a clean slate.
+- **Two transports.** Default push-to-talk over SSE; optional low-latency full-duplex WebRTC with server VAD and barge-in.
+- **Streaming-first.** Text commits before audio drains, so a failed narrator never loses the answer.
+- **Durable narrow workflow.** Appointment scheduling with explicit confirmation, conflict detection, cancellation, human handoff, deterministic post-call summary, and tokenized shareable transcripts.
+- **TTS failover.** Realtime narrator first, legacy Speech API second; the chain is reported by `/api/ready`.
+- **Operational visibility.** Per-turn traces, stage percentiles, guarded `/api/metrics`, and a deterministic offline eval harness.
+- **Fail-closed controls.** Production access gate, rate limits, daily budget, byte caps, session serialization, CSP nonce, and hashed session ids.
 
-Pipeline: **push-to-talk → STT → streaming LLM (+ tools) → sentence-level TTS → ordered playback**.
+---
+
+## Product loop
+
+### Default SSE cascade
+
+1. Tap the mic, speak, and stop (60-second cap). Or just type.
+2. The server transcribes audio with `gpt-transcribe`, then streams `gpt-6-luna` with tools.
+3. Search runs only when freshness matters; scheduling tools run when the user asks to book.
+4. Completed sentences are synthesized and played in order while the rest of the answer is still being generated.
+5. The turn is committed as text first; audio continues on the same SSE connection.
+6. A `workflow` event refreshes persisted scheduling state, and the composer stays available for follow-ups.
+
+```text
+push-to-talk / text
+        │
+        ▼
+byte cap → guard → STT → streaming LLM + tools
+        │                    │
+        │                    ├─ delta events → sentence chunker → TTS chain → ordered audio
+        │                    └─ commit history → done → workflow state
+        ▼
+SSE: session → transcript? → delta… → done → workflow? → audio…
+```
+
+### Optional Realtime/WebRTC mode
+
+When `REALTIME_ENABLED=true`, the UI shows a **Live voice** button. The browser:
+
+1. Calls `/api/realtime/token`; the server mints a short-lived client secret with OpenAI using the standard key, session policy, input transcription, and `server_vad` with `interrupt_response: true`.
+2. Creates an `RTCPeerConnection`, adds the microphone track and an `oai-events` data channel, and posts the SDP offer directly to `https://api.openai.com/v1/realtime/calls` with the ephemeral secret.
+3. Receives transcripts and text deltas over the data channel while model speech arrives on the media track.
+4. Interrupts naturally by speaking; a manual **Stop** sends `response.cancel` plus `input_audio_buffer.clear`.
+5. Reports final audio seconds and output tokens to `/api/realtime/usage` when the session ends.
+6. Falls back to the standard SSE voice path if any setup step fails.
+
+The OpenAI key never leaves the server. The browser only sees the ephemeral secret, and the CSP allows the Realtime origin only when the flag is on.
+
+> Scope note: the persisted scheduling tools are wired into the SSE tool loop. Realtime mode is currently a transport preview with live transcription and barge-in; use the standard path for tool-driven booking.
 
 ---
 
 ## Architecture
 
-```
+```text
 Browser
-  ├─ MediaRecorder (webm/opus, mp4 on Safari)
-  ├─ SSE reader: text deltas + audio chunks
-  ├─ ordered audio queue with autoplay fallback
-  └─ text composer + session history hydration
+  ├─ MediaRecorder (default push-to-talk)
+  ├─ SSE reader + ordered audio queue + autoplay recovery
+  ├─ optional RTCPeerConnection + oai-events data channel
+  └─ session hydration, workflow panel, share links
         │
         ▼
-proxy.ts ── per-request CSP nonce for document routes
+proxy.ts ── per-request nonce + strict Content Security Policy
         │
         ▼
 Next.js route handlers (Node runtime)
-  ├─ guard        rate limit → prod access gate → access code → daily budget
-  ├─ POST /api/chat/stream    text → SSE (delta, done, audio)
-  ├─ POST /api/voice/stream   audio → STT → SSE (transcript, delta, audio)
-  ├─ POST /api/chat           blocking JSON fallback
-  ├─ POST /api/voice          blocking JSON fallback
-  ├─ GET  /api/history        hydrate a session
-  ├─ POST /api/reset          clear a session
-  ├─ GET  /api/health         liveness (+ opt-in detail)
-  └─ GET  /api/ready          readiness for orchestrators
+  ├─ conversation: chat, voice, history, reset
+  ├─ workflow: state, summary, shareable transcript
+  ├─ observability: health, ready, metrics
+  ├─ realtime: ephemeral token, usage reporting
+  └─ guard: rate limit → production gate → access code → daily budget
         │
         ▼
 lib/
-  ai.ts            pooled OpenAI client: STT / LLM stream + tool loop / TTS
-  streaming.ts     one streamed turn: mutex → deltas → commit → audio drain
-  session-lock.ts  per-session mutex that serializes turns
-  sse.ts           SSE framing + sentence chunker
-  sse-response.ts  stream lifecycle: heartbeat, deadline, aborts, late errors
-  body.ts          byte-capped JSON and multipart parsing
-  tools.ts         search_web (Tavily, keyless DuckDuckGo fallback)
-  conversation.ts  TTL + LRU-bounded in-memory sessions
-  guard.ts         client identity, rate limiting, access control, budget
-  config.ts        env-driven settings
-  logger.ts        structured JSON logs + session-id redaction
-  http.ts          typed error → response mapping
+  ai.ts               pooled OpenAI client: STT / LLM stream + tool loop
+  tts.ts / realtime-tts.ts   ordered TTS provider chain
+  streaming.ts        turn lifecycle: lock, deltas, commit, workflow refresh
+  telemetry.ts        turn traces + bounded p50/p95 registry
+  evals.ts            deterministic pass@1 / pass@5 scoring
+  workflow-*.ts       durable state, tools, deterministic summary
+  guard.ts / ratelimit.ts    access control and AI budget
+  conversation.ts     TTL + LRU-bounded in-memory history
+  csp.ts / realtime-events.ts / realtime-budget.ts
 ```
 
-### Streamed turn
+### Turn guarantees
 
-```
-POST /api/voice/stream (multipart audio)
-        │
-        ▼
-  byte cap → duration/audio checks → STT → transcript
-        │
-        ▼
-  SSE: session, transcript
-        │
-        ▼
-  session lock → LLM stream ──► delta events ──► sentence chunker ──► TTS queue
-        │                                                            │
-        ▼                                                            ▼
-  commit + done { reply, history, spoken } ────────────────────► audio events
-        │
-        ▼
-  connection closes once the audio queue drains
-```
-
-Text is never blocked by speech: `done` is sent and the turn is committed as soon as the model finishes, while sentence audio keeps streaming on the same connection afterwards. If TTS fails, the request still succeeds and `audio` is simply absent. Tool calls run concurrently inside a bounded loop (default 4 rounds).
-
-Turns for one session are serialized, so a retry or a second tab cannot read stale history or commit duplicate messages. SSE comments (`: ping`) keep quiet connections alive, and `TURN_TIMEOUT_MS` aborts a stalled turn so it cannot hold the session lock forever.
+- One turn per session at a time via a per-session mutex.
+- `session → transcript? → delta… → done → workflow? → audio…` is the SSE order. `workflow` is additive and may be observed after `audio`.
+- Heartbeat comments keep idle streams alive; `TURN_TIMEOUT_MS` aborts a stalled turn.
+- Client-aborted streams keep their budget reservation because provider work may already have been billed. Failures before useful output refund it.
+- TTS failures degrade to text, not a failed turn.
 
 ---
 
@@ -90,26 +105,37 @@ Turns for one session are serialized, so a retry or a second tab cannot read sta
 | Layer | Choice |
 | --- | --- |
 | Runtime | Node.js 22+ |
-| Framework | Next.js 16 (App Router), React 19 |
+| Framework | Next.js 16 App Router, React 19 |
 | Language | TypeScript (strict) |
-| STT | OpenAI `gpt-transcribe` (JSON transcript) |
-| LLM | OpenAI `gpt-6-luna` with streaming and function calling |
-| TTS | OpenAI Realtime `gpt-realtime-2.1-mini` (speech migration) |
-| Search | Tavily (if configured) or keyless DuckDuckGo Lite + cheerio |
-| Transport | Server-Sent Events for streaming, JSON for fallbacks |
-| Tests | Vitest (route contracts + units, no network) |
+| STT | OpenAI `gpt-transcribe`, JSON response, reads `.text` |
+| LLM | OpenAI `gpt-6-luna`, Chat Completions + tools, `reasoning_effort: "none"` |
+| TTS | `gpt-realtime-2.1-mini` narration with `speech` failover |
+| Search | Tavily when configured, otherwise keyless DuckDuckGo Lite + cheerio |
+| Default transport | SSE for text/audio; JSON for blocking fallbacks |
+| Optional transport | WebRTC + Realtime data channel |
+| Workflow store | Atomic JSON file, single-instance by design |
+| Tests | Vitest, 121 network-free tests |
+| Evals | Deterministic offline dataset, no model required |
 
 ---
 
 ## Quick start
 
+There is no committed `.env.example`. Create `.env.local` yourself:
+
 ```bash
 npm ci
-cp .env.example .env        # set OPENAI_API_KEY
-npm run dev                 # http://localhost:3000
+printf 'OPENAI_API_KEY=sk-your-key\n' > .env.local
+npm run dev
 ```
 
-Smoke test without a microphone:
+On Windows PowerShell:
+
+```powershell
+Set-Content .env.local 'OPENAI_API_KEY=sk-your-key'
+```
+
+Open <http://localhost:3000>. Smoke test without a microphone:
 
 ```bash
 curl -s http://localhost:3000/api/health
@@ -119,81 +145,110 @@ curl -sN -X POST http://localhost:3000/api/chat/stream \
   -d '{"session_id":"demo-session","message":"Hi there!","speak":false}'
 ```
 
+To try the optional live path, add `REALTIME_ENABLED=true` to `.env.local`, restart, and select **Live voice** in the header.
+
 ---
 
 ## Configuration
 
-Next.js loads `.env` automatically for `dev`, `build`, and `start`. On a host, set variables in the dashboard.
+Next.js loads `.env.local` for `dev`, `build`, and `start`. On a host, set the same names in the dashboard/secret store. All config is read from the environment; no secrets are baked into the browser bundle.
 
 ### Required
 
 | Variable | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY` | One server-side key for STT, LLM, and TTS. Never exposed to the browser. |
+| `OPENAI_API_KEY` | Server-side key for STT, LLM, narration, and optional Realtime. Never sent to the browser. |
 
-### Models
+### Models and TTS
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `STT_MODEL` | `gpt-transcribe` | JSON transcription; the app reads `.text` |
-| `LLM_MODEL` | `gpt-6-luna` | Chat Completions + tools |
-| `LLM_REASONING_EFFORT` | `none` | Required for tools on `gpt-6-luna`; set `default`, `off`, or empty to omit the field |
-| `TTS_PROVIDER` | `realtime` | `realtime` (default) or `speech` (legacy migration window) |
-| `REALTIME_TTS_MODEL` | `gpt-realtime-2.1-mini` | Realtime model used for narration |
-| `REALTIME_TTS_VOICE` | `marin` | Realtime voice for narration |
-| `REALTIME_TTS_INSTRUCTIONS` | see `lib/config.ts` | Narration instructions for the realtime session |
-| `TTS_MODEL` | `gpt-4o-mini-tts` | Legacy Speech API model; only used when `TTS_PROVIDER=speech` |
-| `TTS_VOICE` | `alloy` | Voice for the legacy speech path |
-| `MAX_TOOL_ROUNDS` | `4` | |
-| `MAX_REPLY_TOKENS` | `600` | Sent as `max_completion_tokens` |
-| `OPENAI_TIMEOUT_MS` | `30000` | |
-| `OPENAI_MAX_RETRIES` | `2` | |
+| `STT_MODEL` | `gpt-transcribe` | JSON transcription; the app reads `.text`. Also used for Realtime input transcription. |
+| `LLM_MODEL` | `gpt-6-luna` | Chat Completions + function calling. |
+| `LLM_REASONING_EFFORT` | `none` | Required for tools on `gpt-6-luna`. Use `default`, `off`, or empty to omit the field. |
+| `TTS_PROVIDER` | `realtime` | Primary narrator: `realtime` or legacy `speech`. |
+| `TTS_FALLBACK_PROVIDER` | `speech` | Second adapter. Set `none`/`off` to stop after the primary. |
+| `REALTIME_TTS_MODEL` | `gpt-realtime-2.1-mini` | Realtime narrator model. |
+| `REALTIME_TTS_VOICE` | `marin` | Realtime narrator voice. |
+| `REALTIME_TTS_INSTRUCTIONS` | see `lib/config.ts` | Narration style instructions. |
+| `TTS_MODEL` | `gpt-4o-mini-tts` | Legacy Speech model; used only by the `speech` adapter. |
+| `TTS_VOICE` | `alloy` | Legacy Speech voice. |
+| `MAX_TOOL_ROUNDS` | `4` | Bounded tool loop. |
+| `MAX_REPLY_TOKENS` | `600` | Sent as `max_completion_tokens`. |
+| `OPENAI_TIMEOUT_MS` | `30000` | Provider request timeout. |
+| `OPENAI_MAX_RETRIES` | `2` | Provider retries. |
 
-`gpt-6-luna` supports Chat Completions function calling only with `reasoning_effort: "none"`, which is why reasoning is disabled by default. If you swap in another model, either leave `LLM_REASONING_EFFORT` empty to omit the parameter or set an effort that model accepts.
+`/api/ready` reports the effective chain, for example:
 
-> **Model lifecycle:** the Speech API models (`gpt-4o-mini-tts`, `tts-1`, `tts-1-hd`) shut down on **January 6, 2027**. OpenAI has no drop-in `/v1/audio/speech` replacement; the migration target is `gpt-realtime-2.1-mini` over the Realtime API, which is a different transport and workflow. Voxen now narrates through the Realtime API by default (`TTS_PROVIDER=realtime`): each sentence opens a Realtime session, sends the text as an input message, streams base64 PCM audio back, and returns it wrapped in a WAV container. The legacy Speech API path stays available behind `TTS_PROVIDER=speech` during the migration window. If you override the defaults, note that `gpt-4o-mini` shuts down on **January 14, 2027** and `gpt-4o-mini-transcribe` on **February 26, 2027**.
+```json
+{ "status": "ready", "tts": { "primary": "realtime", "fallback": "speech", "chain": ["realtime", "speech"] } }
+```
+
+> **Model lifecycle:** the Speech API models shut down **2027-01-06**, `gpt-4o-mini` on **2027-01-14**, and `gpt-4o-mini-transcribe` on **2027-02-26**. Voxen defaults to the Realtime narrator and keeps `speech` only as a time-boxed failover. Set `TTS_FALLBACK_PROVIDER=none` after retiring the legacy adapter.
 
 ### Search
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `SEARCH_PROVIDER` | `auto` | `auto`, `tavily`, or `duckduckgo` |
-| `TAVILY_API_KEY` | — | Recommended for production |
-| `SEARCH_TIMEOUT_MS` | `8000` | Per-search timeout |
+| `SEARCH_PROVIDER` | `auto` | `auto`, `tavily`, or `duckduckgo`. |
+| `TAVILY_API_KEY` | — | Recommended for production. |
+| `SEARCH_TIMEOUT_MS` | `8000` | Per-search timeout. |
 
-With `auto`, Tavily is used when `TAVILY_API_KEY` is set; otherwise the keyless DuckDuckGo scraper is used. Tavily failures fall back to DuckDuckGo.
+`auto` uses Tavily when a key is present and otherwise the keyless DuckDuckGo scraper. Tavily failures fall back to DuckDuckGo. Search results are treated as untrusted third-party text.
 
-### State and limits
-
-| Variable | Default | Notes |
-| --- | --- | --- |
-| `MAX_HISTORY_MESSAGES` | `20` | Messages kept after the system prompt |
-| `SESSION_TTL_MS` | `1800000` | 30 minutes of inactivity |
-| `MAX_SESSIONS` | `1000` | LRU eviction beyond this |
-| `MAX_AUDIO_BYTES` | `4194304` | 4 MB audio cap |
-| `MAX_AUDIO_SECONDS` | `60` | Client-reported length; `audio_duration` is required |
-| `MAX_MESSAGE_CHARS` | `4000` | Text input cap |
-| `MAX_CHAT_REQUEST_BYTES` | `65536` | JSON request cap |
-| `MAX_VOICE_REQUEST_BYTES` | `4718592` | Multipart request cap (audio + overhead) |
-| `RATE_LIMIT_REQUESTS` | `20` | Per client, per route, per window |
-| `RATE_LIMIT_WINDOW_MS` | `60000` | Window length |
-| `DAILY_REQUEST_BUDGET` | `1000` | Process-wide AI request cap per UTC day |
-| `TURN_TIMEOUT_MS` | `90000` | Hard cap for one streamed turn |
-| `SSE_HEARTBEAT_MS` | `15000` | Keep-alive comment cadence |
-
-### Proxy, access, metadata
+### Conversation, limits, and streaming
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `TRUST_PROXY_HOPS` | auto | Trusted proxies in front of the app. Defaults to `1` only when the Vercel/Render/Fly markers are present, otherwise `0`. |
-| `ACCESS_CODE` | — | Shared secret sent as `x-access-code`; the UI shows a gate. **Required in production.** |
-| `MIN_ACCESS_CODE_LENGTH` | `16` | Minimum accepted access-code length in production |
-| `REQUIRE_ACCESS_CODE` | `true` | Set to `false` to deliberately allow a public production deploy |
-| `APP_VERSION` | `1.1.0` | Reported by `/api/health` |
+| `MAX_HISTORY_MESSAGES` | `20` | Messages kept after the system prompt. |
+| `SESSION_TTL_MS` | `1800000` | 30 minutes of inactivity. |
+| `MAX_SESSIONS` | `1000` | LRU eviction beyond this. |
+| `MAX_AUDIO_BYTES` | `4194304` | Decoded audio cap. |
+| `MAX_AUDIO_SECONDS` | `60` | Client-reported duration; `audio_duration` is required. |
+| `MAX_MESSAGE_CHARS` | `4000` | Text input cap. |
+| `MAX_CHAT_REQUEST_BYTES` | `65536` | JSON request cap. |
+| `MAX_VOICE_REQUEST_BYTES` | `4718592` | Multipart request cap. |
+| `RATE_LIMIT_REQUESTS` | `20` | Per client, per route group, per window. |
+| `RATE_LIMIT_WINDOW_MS` | `60000` | Window length. |
+| `DAILY_REQUEST_BUDGET` | `1000` | Process-wide AI request cap per UTC day. |
+| `TURN_TIMEOUT_MS` | `90000` | Hard cap for one streamed turn. |
+| `SSE_HEARTBEAT_MS` | `15000` | Keep-alive cadence. |
 
-In production (`NODE_ENV=production`), the API **fails closed** when the access gate is missing or weak: guarded routes return `503 CONFIG_ERROR`, and `/api/ready` reports `access_code_not_configured`. Development and test are unaffected. Set `REQUIRE_ACCESS_CODE=false` only when you intend to run without a gate.
+### Workflow
 
-`TRUST_PROXY_HOPS=0` means `X-Forwarded-For` is ignored and every direct client shares one rate-limit bucket. Auto-detection covers Vercel, Render, and Fly only. On Railway or behind nginx/a load balancer, set the real hop count explicitly; otherwise all clients look like one address.
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `WORKFLOW_ENABLED` | `true` | Set `false` to remove scheduling tools and the `workflow` SSE event. |
+| `WORKFLOW_STORE_PATH` | `.data/voxen-workflow.json` | Atomic JSON store; `.data/` is gitignored. |
+| `APPOINTMENT_MINUTES` | `30` | Slot length and alignment. |
+
+Slots are future weekdays from **09:00–17:00 UTC**, aligned to `APPOINTMENT_MINUTES`. The model must call `find_appointment_slots`, then `prepare_appointment`, and only call `confirm_appointment` after an explicit user agreement. `confirm_appointment` requires `confirm: true`; a double-booking returns `slot_taken`. `cancel_appointment` uses the confirmation code, and `handoff_to_human` records a reason. A corrupt store fails closed with `500 CONFIG_ERROR` rather than silently losing bookings.
+
+### Realtime/WebRTC
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `REALTIME_ENABLED` | `false` | Must be exactly `true` to expose the transport. |
+| `REALTIME_MODEL` | `gpt-realtime-2.1-mini` | Full-duplex speech-to-speech model. |
+| `REALTIME_VOICE` | `marin` | Live voice. |
+| `REALTIME_INSTRUCTIONS` | see `lib/config.ts` | Session policy, kept server-side. |
+| `REALTIME_MAX_SESSIONS` | `3` | Concurrent sessions per session id. |
+| `REALTIME_MAX_AUDIO_SECONDS` | `180` | Audio-minute cap per session. |
+| `REALTIME_MAX_OUTPUT_TOKENS` | `4000` | Output-token cap per session. |
+
+The token route sets `OpenAI-Safety-Identifier` to a redacted session hash, reserves a session before minting, and refunds the reservation on upstream failure. Usage is reported when the browser session ends. The CSP includes `https://api.openai.com` and `wss://api.openai.com` only while this flag is enabled.
+
+### Access, proxy, and metadata
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `TRUST_PROXY_HOPS` | auto | `1` on Vercel/Render/Fly, otherwise `0`. Set explicitly behind other proxies. |
+| `ACCESS_CODE` | — | Shared secret sent as `x-access-code`; UI shows a gate. Required in production. |
+| `MIN_ACCESS_CODE_LENGTH` | `16` | Production minimum. |
+| `REQUIRE_ACCESS_CODE` | `true` | Set `false` only for a deliberately public production deploy. |
+| `APP_VERSION` | `1.1.0` | Reported by `/api/health`. |
+
+Production fails closed: a missing or short `ACCESS_CODE` makes guarded routes return `503 CONFIG_ERROR`, and `/api/ready` reports `access_code_not_configured`. `TRUST_PROXY_HOPS=0` ignores `X-Forwarded-For`, so a direct deployment cannot be spoofed into bypassing rate limits.
 
 ---
 
@@ -201,79 +256,74 @@ In production (`NODE_ENV=production`), the API **fails closed** when the access 
 
 All JSON responses set `cache-control: no-store` and `x-request-id`. Guarded routes also return `RateLimit-Limit`, `RateLimit-Remaining`, and `RateLimit-Reset`.
 
-### `GET /api/health`
+### Conversation
 
-Public liveness probe. `?verify=1` validates an access code. `?detail=1` adds configuration, budget, and session counts; both query modes are guarded.
+| Route | Request | Response |
+| --- | --- | --- |
+| `POST /api/chat` | `{ session_id?, message, speak? }` | Blocking `{ session_id, reply, audio, history }`. |
+| `POST /api/chat/stream` | Same body | `text/event-stream`. |
+| `POST /api/voice` | multipart: `audio`, `session_id`, `audio_duration`, `speak` | Blocking chat response plus `transcript`. |
+| `POST /api/voice/stream` | Same multipart fields | `text/event-stream`. |
+| `GET /api/history` | `x-session-id` header or `?session_id=` | `{ session_id, history }`. |
+| `POST /api/reset` | `{ session_id }` | `{ status: "ok", session_id }`. |
+
+A missing or invalid `audio_duration` returns `400 INVALID_AUDIO_DURATION` before STT or budget reservation. Blocking routes exist for clients that cannot consume SSE.
+
+### Observability
+
+| Route | Notes |
+| --- | --- |
+| `GET /api/health` | Public liveness. Includes `access_required` and `realtime_enabled`. `?verify=1` checks an access code; `?detail=1` adds config, budget, sessions, workflow stats, and TTS chain. Both query modes are guarded. |
+| `GET /api/ready` | Orchestrator readiness. Fails when AI is missing or production access is misconfigured. |
+| `GET /api/metrics` | Guarded in-process telemetry. Consumes no AI budget and exposes no transcript content. |
+
+Example `/api/metrics` shape:
 
 ```json
 {
   "status": "ok",
-  "name": "Voxen",
-  "version": "1.1.0",
-  "uptime_seconds": 42,
-  "access_required": false
+  "counters": { "turn.ok": 12, "turn.error.TTS_FAILED": 1 },
+  "timings": {
+    "stage.stt": { "count": 13, "p50": 310, "p95": 720, "max": 910 },
+    "turn.total": { "count": 13, "p50": 1420, "p95": 2600, "max": 3100 }
+  }
 }
 ```
 
-### `GET /api/ready`
+Traces are also emitted as structured `turn.trace` log events with milestones `transcript`, `first_delta`, `done`, `first_audio`, `complete`; stages `stt`, `llm`, `tts`; a request id; and a hashed session id. Values are in-process and bounded to the last 500 samples per metric.
 
-Readiness probe. Returns `503 { "status": "not_ready", "reason": "ai_not_configured" }` when `OPENAI_API_KEY` is missing, and `503 { "status": "not_ready", "reason": "access_code_not_configured" }` when production lacks a valid access gate. Returns `200 { "status": "ready" }` otherwise.
+### Workflow and sharing
 
-### `POST /api/chat`
+| Route | Notes |
+| --- | --- |
+| `GET /api/workflow` | `x-session-id` or `?session_id=`. Returns `enabled`, `workflow`, `appointments`, and aggregate `stats`. |
+| `POST /api/workflow/summary` | `{ session_id }`. Returns deterministic `headline`, `action_items`, `decisions`, `share_token`, and `share_url`. |
+| `GET /api/transcript/{token}` | Read-only shared transcript. The high-entropy token is the bearer secret; the payload omits the session id. |
 
-Blocking JSON fallback.
+The summary is computed locally from committed history and persisted workflow state—no extra model call, so it is instant, cheap, and reproducible for evals.
 
-```json
-// request
-{ "session_id": "uuid?", "message": "What is a process?", "speak": true }
+### Realtime
 
-// 200
-{
-  "session_id": "uuid",
-  "reply": "A process is a running instance of a program…",
-  "audio": "<base64 mp3> | null",
-  "history": [{ "role": "user", "content": "…" }]
-}
-```
+| Route | Notes |
+| --- | --- |
+| `POST /api/realtime/token` | `{ session_id }`. Guarded; returns `{ value, expires_at?, session_id, model, limits }`. Disabled unless `REALTIME_ENABLED=true`. |
+| `POST /api/realtime/usage` | `{ session_id, audio_seconds, output_tokens }`. Guarded; enforces caps and records final usage. |
 
-### `POST /api/chat/stream`
-
-Same request body; responds with `text/event-stream`.
-
-### `POST /api/voice`
-
-`multipart/form-data`: `audio` (file, required), `session_id`, `audio_duration` (**required**, finite non-negative seconds), `speak` (`"true"`/`"false"`). Returns the same shape as `/api/chat` plus `transcript`. A missing or invalid duration returns `400 INVALID_AUDIO_DURATION` before STT runs or budget is reserved.
-
-### `POST /api/voice/stream`
-
-Same multipart fields; responds with `text/event-stream`.
-
-### `GET /api/history`
-
-Send the session id as an `x-session-id` header (or `?session_id=…` for curl). Returns `{ "session_id": "…", "history": [...] }`.
-
-### `POST /api/reset`
-
-```json
-{ "session_id": "uuid" }   →   { "status": "ok", "session_id": "uuid" }
-```
+A browser error above the cap returns `429 BUDGET_EXHAUSTED`; the UI then falls back to standard voice mode.
 
 ### Streaming events
 
 | Event | Payload | Meaning |
 | --- | --- | --- |
-| `session` | `{ session_id }` | Session resolved (or created) |
-| `transcript` | `{ transcript }` | Voice routes only: STT result |
-| `delta` | `{ text }` | Incremental model text |
-| `audio` | `{ index, audio }` | Base64 MP3 for one sentence; play in index order |
-| `done` | `{ session_id, reply, history, spoken }` | Turn committed; may arrive before the remaining `audio` events |
-| `error` | `{ error_code, message, request_id }` | Failure after the stream opened |
+| `session` | `{ session_id }` | Session resolved or created. |
+| `transcript` | `{ transcript }` | Voice routes only: STT result. |
+| `delta` | `{ text }` | Incremental model text. |
+| `audio` | `{ index, audio }` | Base64 WAV for one sentence; play in index order. |
+| `done` | `{ session_id, reply, history, spoken }` | Turn committed. May arrive before remaining audio. |
+| `workflow` | `{ workflow, appointments }` | Additive persisted-state refresh after a successful commit. |
+| `error` | `{ error_code, message, request_id }` | Failure after the stream opened; turn is not committed. |
 
-Events arrive as `session → transcript? → delta… → done → audio…`. Speech continues after `done`, so the turn is durable even if playback is interrupted. Lines beginning with `:` are keep-alive comments, not events.
-
-Failures before the first byte use normal JSON error responses. Failures after streaming starts arrive as an `error` event and the turn is **not** committed to history. A turn that exceeds `TURN_TIMEOUT_MS` ends with `error_code: "TURN_TIMEOUT"` (aborted, not committed).
-
-Streaming routes synthesize speech by default. Pass `"speak": false` (JSON) or `speak=false` (multipart) for a silent stream.
+Lines beginning with `:` are keep-alives. Failures before the first byte use normal JSON errors.
 
 ### Errors
 
@@ -283,118 +333,160 @@ Failures return `{ "detail": { "error_code", "message", "request_id" } }`.
 | --- | --- |
 | 400 | `INVALID_BODY`, `EMPTY_MESSAGE`, `INVALID_SESSION`, `MISSING_SESSION`, `EMPTY_AUDIO`, `INVALID_AUDIO_DURATION`, `NOTHING_HEARD` |
 | 401 | `ACCESS_DENIED` |
+| 404 | `NOT_FOUND` |
 | 413 | `PAYLOAD_TOO_LARGE`, `MESSAGE_TOO_LONG`, `AUDIO_TOO_LARGE`, `AUDIO_TOO_LONG` |
 | 429 | `RATE_LIMITED`, `BUDGET_EXHAUSTED` |
 | 500 | `CONFIG_ERROR`, `INTERNAL` |
-| 502 | `STT_FAILED`, `LLM_FAILED` |
-| 503 | `CONFIG_ERROR` (production access gate missing or too short) |
+| 502 | `STT_FAILED`, `LLM_FAILED`, `TTS_FAILED`, `REALTIME_FAILED` |
+| 503 | `CONFIG_ERROR` (production access gate missing/short, or Realtime disabled) |
 
-An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTTP status. In production, 5xx messages are replaced with a generic string so upstream details are not leaked.
+An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTTP status. In production, 5xx messages are replaced with a generic string.
 
 ---
 
 ## Security and cost controls
 
-- `OPENAI_API_KEY` is server-only; no secret is sent to the browser.
-- Guards run in the safe order: **rate limit → production access gate → access code → daily budget**. A production deploy without a valid `ACCESS_CODE` fails closed before any paid work starts. Failed access-code attempts are counted, so the code cannot be brute-forced without a bound. Comparison is timing-safe.
-- Budget reservations are **refunded** when a turn fails before producing a useful result: STT errors, empty transcripts, and model failures release their reservation. Junk audio therefore cannot exhaust the daily cap. Client-aborted streams still count, since provider work may already have been billed.
-- Client addresses come from `X-Forwarded-For` only when `TRUST_PROXY_HOPS` is set; otherwise the header is ignored to prevent spoofing.
-- Request bodies are byte-capped **before** JSON or multipart parsing. Audio is additionally checked for size and for a required, finite duration.
-- Turns are serialized per session, so concurrent requests cannot interleave history reads or duplicate commits.
-- Streams send keep-alive comments and enforce a hard deadline; a stalled turn is aborted and its lock released.
-- Session ids act as bearer tokens: they are validated against a strict URL-safe pattern, sent in headers by the client, and hashed in logs.
-- Session state is TTL-expired and LRU-bounded, so public traffic cannot grow memory without limit.
-- Document responses carry a strict, nonce-based Content Security Policy plus HSTS in production. API responses are JSON/SSE only.
-- Errors expose a stable code and request id without stack traces. 4xx traffic is logged at info/warn; only 5xx is logged as an error.
-- The Docker image runs as a non-root user and ships a readiness healthcheck.
+- `OPENAI_API_KEY` is server-only. Realtime browsers receive only a short-lived client secret.
+- Guard order is **rate limit → production access gate → access code → daily budget**. Production fails closed before paid work.
+- Access-code attempts are rate-limited and compared in constant time.
+- Failed turns refund their budget reservation; client aborts intentionally keep it.
+- Body bytes are capped before JSON/multipart parsing; audio has required duration plus size checks.
+- Turns are serialized per session; streams have heartbeats and hard deadlines.
+- Session ids are bearer tokens: strict validation, header transport, and hashed logging via `redactSessionId()`.
+- Share tokens are separate bearer secrets; shared payloads omit the session id.
+- History is TTL-expired and LRU-bounded; telemetry samples and tracked Realtime sessions are bounded too.
+- Documents receive a nonce-based CSP, HSTS in production, and strict frame/origin policies. Realtime origins are added only under the flag.
+- Errors expose stable codes and request ids without stack traces.
+- The Docker image runs as a non-root user and checks `/api/ready`.
 
-**Operational limits:** rate limits, daily budget, sessions, and the session lock are **per process**. That is correct for a single Docker/Render/Fly instance. On multi-instance serverless, move `lib/ratelimit.ts` and `lib/conversation.ts` to shared stores (Redis/Postgres) before relying on them as hard caps.
+**Scaling boundary:** rate limits, budget, session history, telemetry, Realtime usage, and the workflow file are per process. Move them to Redis/Postgres before running multiple instances that must share hard caps or booking state.
 
 ---
 
-## Testing
+## Testing and evals
 
 ```bash
-npm run check     # typecheck + tests
-npm test          # 73 tests
+npm run check     # typecheck + 121 tests
+npm test          # Vitest, no network or API key
 npm run audit     # production dependency audit
+npm run build     # Next.js standalone build
+npm run eval      # deterministic offline eval dataset
 ```
 
-Tests need **no API key and no network**. The AI provider is mocked, the tool loop is exercised directly, and `fetch` is stubbed for search. Coverage includes:
+Tests need no API key or network. Coverage includes:
 
-- route contracts for blocking and streaming chat/voice
-- SSE event order (`done` before audio), audio chunking, and error-after-stream behavior
-- keep-alive heartbeats and `TURN_TIMEOUT` deadlines
-- atomic turns, per-session serialization, and session isolation
-- production access-gate fail-closed behavior and readiness reporting
-- budget refunds for failed turns and required recording duration
-- access-code rate limiting and proxy trust
-- request-size and message/audio limits
-- history trimming and session validation
-- model request shape (`max_completion_tokens`, `reasoning_effort`, JSON transcripts)
-- provider switching, tool-loop bounds, and failure mapping
+- blocking and streaming route contracts
+- SSE order, `done` before audio, heartbeats, and turn deadlines
+- TTS provider chain and mocked failover
+- health/ready reporting, access gate fail-closed behavior, and budget refunds
+- telemetry traces, percentiles, and guarded metrics
+- eval scoring, pass@1/pass@5, and dataset parsing
+- durable appointment store: atomic writes, conflicts, cancellation, corrupt-store fail-closed
+- scheduling tools, session-scoped workflow state, summaries, and share tokens
+- Realtime token/usage routes, concurrent session caps, CSP policy, and event parsing
 
-CI runs typecheck, tests, and a production build on every push and PR (`.github/workflows/ci.yml`).
+`npm run eval` reads `evals/dataset.json` and scores recorded attempts across `timing`, `recovery`, and `grounded` dimensions. It is deterministic and offline; the bundled dataset currently reports **pass@1=55%, pass@5=100%**. Add your own cases by appending `{ testCase, attempts }` entries.
+
+CI runs `npm ci`, `npm run audit`, `npm run typecheck`, `npm test`, and `npm run build` with a placeholder key. On Windows, use `npm.cmd` in PowerShell.
+
+---
+
+## Deployment
+
+### Node
+
+```bash
+npm ci
+npm run build
+npm start
+```
+
+Set the production environment before starting, especially `OPENAI_API_KEY` and either a long `ACCESS_CODE` or `REQUIRE_ACCESS_CODE=false`.
+
+### Docker
+
+```bash
+docker build -t voxen .
+docker run --env-file .env.local -p 3000:3000 voxen
+```
+
+Mount a writable volume and set `WORKFLOW_STORE_PATH` for appointment state that survives container replacement. For example, use `WORKFLOW_STORE_PATH=/data/voxen-workflow.json` and mount `/data` with permissions for uid 1001.
+
+### Production checklist
+
+- Use HTTPS so microphone access and WebRTC are allowed.
+- Set `TRUST_PROXY_HOPS` if behind a proxy that supplies `X-Forwarded-For`.
+- Confirm `/api/ready` returns `ready` and the expected TTS chain.
+- Watch `/api/metrics` for p95 latency and provider failures.
+- Keep `REALTIME_ENABLED=false` until you have tested the flag with your account and browser matrix.
+- Use one instance, or move all in-process state to shared stores first.
+- Set `TTS_FALLBACK_PROVIDER=none` after the legacy Speech API shutdown.
 
 ---
 
 ## Project structure
 
-```
+```text
 app/
   api/
-    chat/route.ts            blocking text turn
-    chat/stream/route.ts     streamed text turn (SSE)
-    voice/route.ts           blocking audio turn
-    voice/stream/route.ts    streamed audio turn (SSE)
-    history/route.ts         session hydration
-    reset/route.ts           clear a session
-    health/route.ts          liveness (+ opt-in detail)
-    ready/route.ts           readiness
+    chat/route.ts                 blocking text turn
+    chat/stream/route.ts          streamed text turn (SSE)
+    voice/route.ts                blocking audio turn
+    voice/stream/route.ts         streamed audio turn (SSE)
+    history/route.ts              session hydration
+    reset/route.ts                clear a session
+    health/route.ts               liveness + feature flags
+    ready/route.ts                readiness + TTS chain
+    metrics/route.ts              guarded telemetry snapshot
+    workflow/route.ts             persisted workflow state
+    workflow/summary/route.ts     post-call summary + share
+    transcript/[token]/route.ts   read-only shared transcript
+    realtime/token/route.ts       ephemeral client secret
+    realtime/usage/route.ts       final Realtime usage
   components/
-    VoiceAgent.tsx           main client UI
+    VoiceAgent.tsx                client state machine
+    AccessGate.tsx                optional preview gate
+    Icons.tsx
     voice-agent/
-      stream.ts              SSE parser + API error mapping
-      useRecorder.ts         MediaRecorder lifecycle
-      useAudioQueue.ts       ordered playback + autoplay recovery
-      Messages.tsx           thread rendering
-    AccessGate.tsx           optional preview gate
-    Icons.tsx                inline SVG icons
-  globals.css                design system + layout
-  layout.tsx / page.tsx / not-found.tsx / error.tsx / icon.svg
+      stream.ts                   SSE parser + API errors
+      realtime.ts                 WebRTC session + data channel
+      useRecorder.ts              push-to-talk recorder
+      useAudioQueue.ts            ordered playback
+      Messages.tsx                thread rendering
+  globals.css / layout.tsx / page.tsx / error.tsx / not-found.tsx
 lib/
-  ai.ts body.ts config.ts conversation.ts errors.ts guard.ts
-  http.ts logger.ts ratelimit.ts session-lock.ts sse.ts sse-response.ts
-  streaming.ts tools.ts validate.ts
-proxy.ts                     CSP nonce + document security policy
-tests/
-  api.test.ts ai.test.ts streaming.test.ts units.test.ts
-scripts/start.mjs            standalone launcher for `npm start`
-Dockerfile  next.config.mjs  vitest.config.mts  .github/workflows/ci.yml
+  ai.ts openai-client.ts tts.ts realtime-tts.ts streaming.ts
+  telemetry.ts evals.ts workflow-store.ts workflow-tools.ts workflow-summary.ts
+  realtime-budget.ts realtime-events.ts csp.ts config.ts
+  guard.ts ratelimit.ts conversation.ts session-lock.ts
+  tools.ts body.ts validate.ts errors.ts http.ts logger.ts sse.ts sse-response.ts
+proxy.ts                          CSP nonce + document policy
+evals/dataset.json                offline eval cases
+scripts/evals.mts                 eval runner
+scripts/start.mjs                 standalone launcher
+tests/                            13 test files, 121 tests
+Dockerfile next.config.mjs vitest.config.mts
+.github/workflows/ci.yml
 ```
 
 ---
 
-## Design notes
+## Why these tradeoffs
 
-- **One deployable unit.** UI and API ship together; no CORS surface.
-- **Server-owned history.** The client sends only a session id; the server is the source of truth.
-- **Atomic turns.** A turn is committed only after the model finishes successfully.
-- **Text wins, speech is best-effort.** The turn commits and `done` is sent before the audio queue drains; TTS failures degrade silently to a text answer.
-- **Sentence-level TTS.** Speech starts before the full answer exists, while an index-based queue keeps chunks in order and recovers from blocked autoplay.
-- **Serialized turns.** One turn per session at a time prevents stale history reads and duplicate commits.
-- **Fail closed.** Production refuses paid traffic unless a real access gate is configured.
-- **Bounded everything.** Request bytes, message length, audio size, tool rounds, history, sessions, stream lifetime, and daily spend all have explicit caps, and failed turns return their budget reservation.
-- **SSE over half-duplex HTTP.** It delivers low-complexity streaming without a WebSocket server. Full-duplex conversation (VAD, barge-in, sub-second turns) needs WebRTC or the OpenAI Realtime API.
+- Market research in Nov 2026 put AI-agent deployment at **57%** with **82%** reporting positive ROI, but EVA-Bench found no system above **0.5** on both accuracy and experience. That favors a narrow, confirmable workflow and measured reliability over broad autonomy.
+- The observed market median for voice responses is roughly **680 ms**. Voxen records stage and total percentiles and includes an opt-in Realtime path rather than pretending the SSE cascade is sub-second.
+- Speech APIs are being replaced by Realtime-style interfaces. Voxen migrates narration now but keeps a reversible failover and documents the shutdown dates.
+- Full-duplex transport changes security, cost, and testing conditions. It stays behind a flag with explicit audio/token caps and a safe fallback.
 
 ---
 
 ## Roadmap
 
-1. **Full-duplex voice** — Realtime API or WebRTC with voice activity detection, barge-in, and <1.5 s to first audio.
-2. **Shared state** — Postgres for users/sessions/messages; Redis for sessions, rate limits, and budget.
-3. **Identity and billing** — real accounts, per-user quotas, Stripe metering.
-4. **Observability and evals** — model traces, latency/cost dashboards, an eval harness for answer quality and tool use.
-5. **Product layer** — scenario packs, scoring, reports, and shareable sessions.
+1. **Shared infrastructure** — Redis/Postgres for sessions, rate limits, budgets, and bookings so caps hold across instances.
+2. **Realtime GA** — tool calling in the live data-channel session, richer browser/device matrix, and measured latency targets.
+3. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
+4. **Stronger evals** — live provider replay, regression gates in CI, and scenario-level scoring.
+5. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
+6. **Horizontal scale** — replace the JSON store and in-process registries without changing the API surface.
 
 > First make it work. Then make it fast. Then make it reliable. Then make it scalable.
