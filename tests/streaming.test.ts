@@ -112,25 +112,29 @@ describe("chat stream", () => {
     expect(response.headers.get("content-type")).toContain("text/event-stream");
 
     const events = parseEvents(await response.text());
-    expect(events.map((event) => event.event)).toEqual([
+    const coreEvents = events.filter((event) => event.event !== "workflow");
+    expect(coreEvents.map((event) => event.event)).toEqual([
       "session",
       "delta",
       "delta",
       "done",
       "audio",
     ]);
-    expect(events[0].data).toEqual({ session_id: sessionId });
-    expect(events[1].data).toEqual({ text: "Hello " });
-    expect(events[3].data).toMatchObject({
+    expect(events.find((event) => event.event === "workflow")?.data).toMatchObject(
+      { workflow: null, appointments: [] },
+    );
+    expect(coreEvents[0].data).toEqual({ session_id: sessionId });
+    expect(coreEvents[1].data).toEqual({ text: "Hello " });
+    expect(coreEvents[3].data).toMatchObject({
       session_id: sessionId,
       reply: "Hello world.",
       spoken: true,
     });
-    expect(events[3].data.history).toEqual([
+    expect(coreEvents[3].data.history).toEqual([
       { role: "user", content: "hi" },
       { role: "assistant", content: "Hello world." },
     ]);
-    expect(events[4].data).toMatchObject({ index: 0, audio: "QUJD" });
+    expect(coreEvents[4].data).toMatchObject({ index: 0, audio: "QUJD" });
     expect(getHistory(sessionId)).toHaveLength(2);
   });
 
@@ -148,7 +152,9 @@ describe("chat stream", () => {
     const events = parseEvents(await response.text());
     expect(events.some((event) => event.event === "audio")).toBe(false);
     expect(mockSynthesize).not.toHaveBeenCalled();
-    expect(events.at(-1)?.data).toMatchObject({ spoken: false });
+    expect(
+      events.find((event) => event.event === "done")?.data,
+    ).toMatchObject({ spoken: false });
   });
 
   it("emits an error event and keeps history clean when the model fails", async () => {
@@ -201,7 +207,11 @@ describe("chat stream", () => {
     });
 
     await expect(turn).resolves.toBe("Hello there.");
-    expect(events).toEqual(["delta", "done", "audio"]);
+    expect(events.filter((event) => event !== "workflow")).toEqual([
+      "delta",
+      "done",
+      "audio",
+    ]);
     expect(getHistory(sessionId).map((message) => message.content)).toEqual([
       "hi",
       "Hello there.",
@@ -256,14 +266,15 @@ describe("voice stream", () => {
 
     expect(response.status).toBe(200);
     const events = parseEvents(await response.text());
-    expect(events.map((event) => event.event)).toEqual([
+    const coreEvents = events.filter((event) => event.event !== "workflow");
+    expect(coreEvents.map((event) => event.event)).toEqual([
       "session",
       "transcript",
       "delta",
       "done",
       "audio",
     ]);
-    expect(events[1].data).toEqual({ transcript: "what time is it" });
+    expect(coreEvents[1].data).toEqual({ transcript: "what time is it" });
     expect(events.find((event) => event.event === "done")?.data).toMatchObject({
       reply: "It is noon.",
       spoken: true,

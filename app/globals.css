@@ -760,6 +760,55 @@ button {
   line-height: 1.5;
 }
 
+.workflow-copy {
+  margin: 0 0 14px;
+  color: var(--muted);
+  font-size: 0.82rem;
+  line-height: 1.5;
+}
+
+.workflow-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.workflow-actions .btn {
+  flex: 1 1 auto;
+  padding: 7px 10px;
+  font-size: 0.78rem;
+}
+
+.summary-box {
+  margin: 0 0 14px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(99, 102, 241, 0.22);
+  background: rgba(99, 102, 241, 0.08);
+  font-size: 0.8rem;
+}
+
+.summary-box strong {
+  display: block;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.summary-box ul {
+  margin: 8px 0;
+  padding-left: 18px;
+  color: var(--muted);
+}
+
+.summary-box a {
+  color: var(--accent-2);
+  text-decoration: none;
+}
+
+.summary-box a:hover {
+  text-decoration: underline;
+}
+
 /* ---------- Buttons & links ---------- */
 
 .btn {

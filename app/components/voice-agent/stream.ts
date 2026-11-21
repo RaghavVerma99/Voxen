@@ -10,11 +10,17 @@ export class ApiError extends Error {
   }
 }
 
+export interface StreamWorkflow {
+  workflow: unknown;
+  appointments: unknown;
+}
+
 export interface StreamHandlers {
   onSession?: (sessionId: string) => void;
   onTranscript?: (transcript: string) => void;
   onDelta?: (text: string) => void;
   onAudio?: (index: number, audio: string) => void;
+  onWorkflow?: (payload: StreamWorkflow) => void;
   onDone?: () => void;
 }
 
@@ -114,6 +120,12 @@ function dispatch(frame: string, handlers: StreamHandlers): void {
       ) {
         handlers.onAudio?.(payload.index, payload.audio);
       }
+      break;
+    case "workflow":
+      handlers.onWorkflow?.({
+        workflow: payload.workflow ?? null,
+        appointments: payload.appointments ?? [],
+      });
       break;
     case "done":
       handlers.onDone?.();

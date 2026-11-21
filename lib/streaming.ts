@@ -1,4 +1,5 @@
 import { streamResponse, synthesizeSpeech } from "./ai";
+import { config } from "./config";
 import {
   appendTurn,
   buildRequestMessages,
@@ -12,6 +13,7 @@ import {
   incrementCounter,
   type TurnTelemetry,
 } from "./telemetry";
+import { getWorkflow, listAppointments } from "./workflow-store";
 
 export interface StreamTurnOptions {
   sessionId: string;
@@ -123,6 +125,22 @@ async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
       spoken: options.speak !== false,
     });
     options.trace?.milestone("done");
+
+    if (config.workflowEnabled) {
+      try {
+        const [workflow, appointments] = await Promise.all([
+          getWorkflow(options.sessionId),
+          listAppointments(options.sessionId),
+        ]);
+        options.send("workflow", { workflow, appointments });
+      } catch (err) {
+        // The turn is already committed; a state refresh must not fail it.
+        logWarning("workflow.state_unavailable", {
+          requestId: options.requestId,
+          message: errorMessage(err),
+        });
+      }
+    }
   }
 
   return { reply, audioChain };

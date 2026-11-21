@@ -27,6 +27,30 @@ interface HistoryPayload {
   history?: Array<{ role: string; content: string }>;
 }
 
+interface WorkflowSnapshot {
+  stage: string;
+  draft?: { startsAt?: string; email?: string; name?: string };
+  handoffReason?: string;
+}
+
+interface AppointmentRecord {
+  confirmationCode: string;
+  startsAt: string;
+  endsAt: string;
+  status: string;
+}
+
+interface WorkflowPayload {
+  workflow?: WorkflowSnapshot | null;
+  appointments?: AppointmentRecord[];
+}
+
+interface ShareState {
+  headline: string;
+  actionItems: string[];
+  url: string;
+}
+
 const SESSION_KEY = "voxen.session_id";
 const CODE_KEY = "voxen.access_code";
 const MAX_RECORD_SECONDS = 60;
@@ -101,6 +125,9 @@ export default function VoiceAgent() {
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
   const [muted, setMuted] = useState(false);
+  const [workflow, setWorkflow] = useState<WorkflowSnapshot | null>(null);
+  const [appointments, setAppointments] = useState<AppointmentRecord[]>([]);
+  const [share, setShare] = useState<ShareState | null>(null);
 
   const sessionRef = useRef("");
   const counterRef = useRef(0);
@@ -207,6 +234,27 @@ export default function VoiceAgent() {
     return true;
   }, []);
 
+  const applyWorkflow = useCallback((payload: WorkflowPayload) => {
+    setWorkflow(payload.workflow ?? null);
+    setAppointments(payload.appointments ?? []);
+  }, []);
+
+  const loadWorkflow = useCallback(
+    async (id: string) => {
+      try {
+        const response = await fetch(
+          `/api/workflow?session_id=${encodeURIComponent(id)}`,
+          { headers: authHeaders(), cache: "no-store" },
+        );
+        if (!response.ok) return;
+        applyWorkflow((await response.json()) as WorkflowPayload);
+      } catch {
+        // Scheduling state is optional; the conversation still works.
+      }
+    },
+    [applyWorkflow, authHeaders],
+  );
+
   const adoptSession = useCallback((id: string) => {
     if (!id || id === sessionRef.current) return;
     sessionRef.current = id;
@@ -276,6 +324,7 @@ export default function VoiceAgent() {
     if (accessRequired && !accessCode) return;
     if (hydratedRef.current === sessionId) return;
     hydratedRef.current = sessionId;
+    void loadWorkflow(sessionId);
 
     let cancelled = false;
 
@@ -306,7 +355,7 @@ export default function VoiceAgent() {
     return () => {
       cancelled = true;
     };
-  }, [sessionId, booting, accessRequired, accessCode, authHeaders]);
+  }, [sessionId, booting, accessRequired, accessCode, authHeaders, loadWorkflow]);
 
   async function handleAccessSubmit(code: string) {
     setAccessBusy(true);
@@ -356,6 +405,9 @@ export default function VoiceAgent() {
         },
         onAudio: (index, chunk) => {
           if (!mutedRef.current) audio.enqueue(index, chunk);
+        },
+        onWorkflow: (payload) => {
+          applyWorkflow(payload as WorkflowPayload);
         },
         onDone: () => {
           completed = true;
@@ -508,6 +560,9 @@ export default function VoiceAgent() {
     flushNow();
     setEntries([]);
     setDraft("");
+    setWorkflow(null);
+    setAppointments([]);
+    setShare(null);
     setStatus("idle");
     setBusy(false);
 
@@ -531,6 +586,53 @@ export default function VoiceAgent() {
       // The new client-side session is still clean; the old one expires by TTL.
     }
   }
+
+  async function shareTranscript() {
+    try {
+      const response = await fetch("/api/workflow/summary", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({ session_id: sessionRef.current }),
+      });
+      if (!response.ok) {
+        handleUnauthorized(response);
+        throw await errorFromResponse(response);
+      }
+
+      const data = (await response.json()) as {
+        summary?: { headline?: string; action_items?: string[] };
+        share_url?: string;
+      };
+      setShare({
+        headline: data.summary?.headline ?? "Session summary",
+        actionItems: data.summary?.action_items ?? [],
+        url: data.share_url ?? "",
+      });
+    } catch (error) {
+      fail(error);
+    }
+  }
+
+  const confirmedAppointment = appointments.find(
+    (appointment) => appointment.status === "confirmed",
+  );
+  const workflowLabel = confirmedAppointment
+    ? "Booked"
+    : workflow?.stage === "awaiting_confirmation"
+      ? "Confirm"
+      : workflow?.stage === "handed_off"
+        ? "Handed off"
+        : "Open";
+  const workflowCopy = confirmedAppointment
+    ? `${new Date(confirmedAppointment.startsAt).toLocaleString()} · ${confirmedAppointment.confirmationCode}`
+    : workflow?.stage === "awaiting_confirmation" && workflow.draft?.startsAt
+      ? `Proposed ${new Date(workflow.draft.startsAt).toLocaleString()}. Say yes to confirm.`
+      : workflow?.stage === "handed_off"
+        ? `A human has been asked to follow up${workflow.handoffReason ? `: ${workflow.handoffReason}` : "."}`
+        : "Ask to schedule a time, or escalate to a person at any point.";
 
   const turns = entries.filter((entry) => entry.role !== "error").length;
   const statusLabel =
@@ -779,6 +881,57 @@ export default function VoiceAgent() {
                 <dd className="mono">{sessionId.slice(0, 8) || "—"}</dd>
               </div>
             </dl>
+          </section>
+
+          <section className="card workflow-card">
+            <div className="card-head">
+              <h2>Scheduling</h2>
+              <span className="pill">{workflowLabel}</span>
+            </div>
+            <p className="workflow-copy">{workflowCopy}</p>
+            {share ? (
+              <div className="summary-box">
+                <strong>{share.headline}</strong>
+                {share.actionItems.length > 0 ? (
+                  <ul>
+                    {share.actionItems.map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                ) : null}
+                <a href={share.url} target="_blank" rel="noreferrer">
+                  Open shareable transcript
+                </a>
+              </div>
+            ) : null}
+            <div className="workflow-actions">
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void submitText("I'd like to schedule an appointment.")}
+                disabled={busy}
+              >
+                Schedule
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() =>
+                  void submitText("I need to speak with a human about this.")
+                }
+                disabled={busy}
+              >
+                Human
+              </button>
+              <button
+                type="button"
+                className="btn"
+                onClick={() => void shareTranscript()}
+                disabled={busy}
+              >
+                Share
+              </button>
+            </div>
           </section>
 
           <section className="card">
