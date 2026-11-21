@@ -85,6 +85,22 @@ describe("realtime token route", () => {
     expect(headers.Authorization).toBe("Bearer test-key");
     expect(headers["OpenAI-Safety-Identifier"]).toMatch(/^sha256:/);
     expect(String(init.body)).not.toContain("test-key");
+
+    const policy = JSON.parse(String(init.body)) as {
+      session: {
+        audio: {
+          input: {
+            transcription: { model: string };
+            turn_detection: { type: string; interrupt_response: boolean };
+          };
+        };
+      };
+    };
+    expect(policy.session.audio.input.transcription.model).toBe("gpt-transcribe");
+    expect(policy.session.audio.input.turn_detection).toMatchObject({
+      type: "server_vad",
+      interrupt_response: true,
+    });
     expect(realtimeUsageSnapshot(id)?.sessions).toBe(1);
   });
 

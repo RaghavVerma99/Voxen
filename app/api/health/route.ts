@@ -24,6 +24,9 @@ export async function GET(request: NextRequest) {
       version: config.appVersion,
       uptime_seconds: Math.round(process.uptime()),
       access_required: accessRequired,
+      // Small client-side feature hint; the token route still independently
+      // checks the flag before exposing any Realtime capability.
+      realtime_enabled: config.realtimeEnabled && isAiConfigured(),
     };
 
     // Configuration, budget and session counts are intentionally private.

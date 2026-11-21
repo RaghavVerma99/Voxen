@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { buildContentSecurityPolicy } from "@/lib/csp";
 
 function createNonce(): string {
   return btoa(crypto.randomUUID());
@@ -12,25 +13,11 @@ function createNonce(): string {
  */
 export function proxy(request: NextRequest) {
   const nonce = createNonce();
-  const isDev = process.env.NODE_ENV === "development";
-
-  const directives = [
-    "default-src 'self'",
-    `script-src 'self' 'nonce-${nonce}' 'strict-dynamic'${isDev ? " 'unsafe-eval'" : ""}`,
-    isDev ? "style-src 'self' 'unsafe-inline'" : `style-src 'self' 'nonce-${nonce}'`,
-    "img-src 'self' blob: data:",
-    "media-src 'self' blob: data:",
-    "font-src 'self'",
-    "connect-src 'self'",
-    "worker-src 'self' blob:",
-    "object-src 'none'",
-    "base-uri 'self'",
-    "form-action 'self'",
-    "frame-ancestors 'none'",
-    ...(isDev ? [] : ["upgrade-insecure-requests"]),
-  ];
-
-  const contentSecurityPolicy = directives.join("; ");
+  const contentSecurityPolicy = buildContentSecurityPolicy({
+    nonce,
+    isDev: process.env.NODE_ENV === "development",
+    realtimeEnabled: process.env.REALTIME_ENABLED === "true",
+  });
 
   const requestHeaders = new Headers(request.headers);
   requestHeaders.set("x-nonce", nonce);

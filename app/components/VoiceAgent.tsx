@@ -17,11 +17,12 @@ import {
   WaveBars,
   type Entry,
 } from "./voice-agent/Messages";
+import { RealtimeVoiceSession } from "./voice-agent/realtime";
 import { ApiError, consumeSse, errorFromResponse } from "./voice-agent/stream";
 import { useAudioQueue } from "./voice-agent/useAudioQueue";
 import { useRecorder } from "./voice-agent/useRecorder";
 
-type Status = "idle" | "recording" | "thinking" | "speaking";
+type Status = "idle" | "recording" | "thinking" | "speaking" | "live";
 
 interface HistoryPayload {
   history?: Array<{ role: string; content: string }>;
@@ -61,6 +62,7 @@ const STATUS_LABEL: Record<Status, string> = {
   recording: "Listening",
   thinking: "Thinking",
   speaking: "Speaking",
+  live: "Live",
 };
 
 const SUGGESTIONS = [
@@ -120,6 +122,8 @@ export default function VoiceAgent() {
   const [accessError, setAccessError] = useState("");
 
   const [sessionId, setSessionId] = useState("");
+  const [realtimeAvailable, setRealtimeAvailable] = useState(false);
+  const [liveMode, setLiveMode] = useState(false);
   const [status, setStatus] = useState<Status>("idle");
   const [entries, setEntries] = useState<Entry[]>([]);
   const [draft, setDraft] = useState("");
@@ -133,6 +137,9 @@ export default function VoiceAgent() {
   const counterRef = useRef(0);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const streamAbortRef = useRef<AbortController | null>(null);
+  const liveRef = useRef<RealtimeVoiceSession | null>(null);
+  const liveUserEntryRef = useRef<string | null>(null);
+  const liveAgentEntryRef = useRef<string | null>(null);
   const textBufferRef = useRef<Map<string, string>>(new Map());
   const flushFrameRef = useRef<number | null>(null);
   const hydratedRef = useRef("");
@@ -193,6 +200,12 @@ export default function VoiceAgent() {
     }
     flushText();
   }, [flushText]);
+
+  const replaceEntryText = useCallback((id: string, text: string) => {
+    setEntries((previous) =>
+      previous.map((entry) => (entry.id === id ? { ...entry, text } : entry)),
+    );
+  }, []);
 
   const fail = useCallback(
     (error: unknown) => {
@@ -276,9 +289,11 @@ export default function VoiceAgent() {
         const response = await fetch("/api/health", { cache: "no-store" });
         const data = (await response.json()) as {
           access_required?: boolean;
+          realtime_enabled?: boolean;
         };
 
         if (cancelled) return;
+        setRealtimeAvailable(data.realtime_enabled === true);
 
         if (data.access_required) {
           setAccessRequired(true);
@@ -316,6 +331,9 @@ export default function VoiceAgent() {
         window.cancelAnimationFrame(flushFrameRef.current);
       }
       audio.stop();
+      const live = liveRef.current;
+      liveRef.current = null;
+      void live?.stop();
     };
   }, [audio]);
 
@@ -374,6 +392,115 @@ export default function VoiceAgent() {
 
     window.localStorage.setItem(CODE_KEY, code);
     setAccessCode(code);
+  }
+
+  async function startLive() {
+    if (!realtimeAvailable || liveRef.current || busy) return;
+
+    streamAbortRef.current?.abort();
+    audio.stop();
+    flushNow();
+    liveUserEntryRef.current = null;
+    liveAgentEntryRef.current = null;
+
+    const session = new RealtimeVoiceSession({
+      onUserDelta: (delta) => {
+        if (!liveUserEntryRef.current) {
+          liveUserEntryRef.current = addEntry("user", "");
+        }
+        queueText(liveUserEntryRef.current, delta);
+        setStatus("recording");
+      },
+      onUserTranscript: (transcript) => {
+        flushNow();
+        if (liveUserEntryRef.current) {
+          replaceEntryText(liveUserEntryRef.current, transcript);
+        } else {
+          addEntry("user", transcript);
+        }
+        liveUserEntryRef.current = null;
+        setStatus("thinking");
+      },
+      onAssistantDelta: (delta) => {
+        if (!liveAgentEntryRef.current) {
+          flushNow();
+          liveAgentEntryRef.current = addEntry("agent", "");
+        }
+        queueText(liveAgentEntryRef.current, delta);
+        setStatus("speaking");
+      },
+      onSpeechStarted: () => {
+        flushNow();
+        liveAgentEntryRef.current = null;
+        setStatus("recording");
+      },
+      onInterrupted: () => {
+        flushNow();
+        liveAgentEntryRef.current = null;
+        setStatus("live");
+      },
+      onResponseDone: () => {
+        flushNow();
+        liveUserEntryRef.current = null;
+        liveAgentEntryRef.current = null;
+        setStatus("live");
+        void loadWorkflow(sessionRef.current);
+      },
+      onError: (message) => addEntry("error", message),
+      onAudioBlocked: () =>
+        addEntry("error", "Your browser blocked live audio. Tap Sound on to listen."),
+      onClosed: () => {
+        setLiveMode(false);
+        setStatus("idle");
+        addEntry(
+          "error",
+          "The live session ended. Standard voice mode is still available.",
+        );
+      },
+    });
+
+    liveRef.current = session;
+    setStatus("thinking");
+
+    try {
+      await session.start({
+        sessionId: sessionRef.current,
+        accessCode,
+      });
+      setLiveMode(true);
+      setStatus("live");
+    } catch (error) {
+      // A user-initiated stop clears the ref while setup is still in flight.
+      if (liveRef.current !== session) return;
+
+      liveRef.current = null;
+      await session.stop();
+
+      if (error instanceof ApiError && error.status === 401) {
+        window.localStorage.removeItem(CODE_KEY);
+        setAccessCode("");
+        setAccessRequired(true);
+      }
+
+      const message =
+        error instanceof Error ? error.message : "Live voice could not start.";
+      addEntry("error", `${message} Standard voice mode is still available.`);
+      setLiveMode(false);
+      setStatus("idle");
+    }
+  }
+
+  async function stopLive() {
+    const session = liveRef.current;
+    liveRef.current = null;
+    setLiveMode(false);
+    setStatus("idle");
+    if (session) await session.stop();
+  }
+
+  function toggleLive() {
+    if (liveMode) void stopLive();
+    else void startLive();
   }
 
   async function runStream(
@@ -448,6 +575,18 @@ export default function VoiceAgent() {
     }
 
     setDraft("");
+
+    if (liveMode && liveRef.current) {
+      addEntry("user", message);
+      setStatus("thinking");
+      try {
+        liveRef.current.sendText(message);
+      } catch (error) {
+        fail(error);
+      }
+      return;
+    }
+
     audio.begin();
     setBusy(true);
     setStatus("thinking");
@@ -525,6 +664,7 @@ export default function VoiceAgent() {
   }
 
   function toggleRecording() {
+    if (liveMode) return;
     if (recorder.recording) recorder.stop();
     else void recorder.start();
   }
@@ -535,6 +675,10 @@ export default function VoiceAgent() {
   }
 
   function stopSpeaking() {
+    if (liveMode) {
+      liveRef.current?.interrupt();
+      return;
+    }
     streamAbortRef.current?.abort();
     audio.stop();
     setStatus("idle");
@@ -544,6 +688,7 @@ export default function VoiceAgent() {
     setMuted((previous) => {
       const next = !previous;
       if (next) audio.stop();
+      liveRef.current?.setMuted(next);
       return next;
     });
   }
@@ -555,9 +700,16 @@ export default function VoiceAgent() {
   }
 
   async function resetConversation() {
+    const live = liveRef.current;
+    liveRef.current = null;
+    if (live) await live.stop();
+
     streamAbortRef.current?.abort();
     audio.stop();
     flushNow();
+    setLiveMode(false);
+    liveUserEntryRef.current = null;
+    liveAgentEntryRef.current = null;
     setEntries([]);
     setDraft("");
     setWorkflow(null);
@@ -671,6 +823,17 @@ export default function VoiceAgent() {
         </div>
 
         <div className="topbar-actions">
+          {realtimeAvailable ? (
+            <button
+              type="button"
+              className={`btn${liveMode ? " is-live" : ""}`}
+              onClick={toggleLive}
+              disabled={busy && !liveMode}
+              aria-pressed={liveMode}
+            >
+              {liveMode ? "End live" : "Live voice"}
+            </button>
+          ) : null}
           <span
             className={`status status-${status}`}
             role="status"
@@ -776,16 +939,22 @@ export default function VoiceAgent() {
                 type="button"
                 className={`mic${recorder.recording ? " is-recording" : ""}`}
                 onClick={toggleRecording}
-                disabled={!recorder.micSupported}
+                disabled={!recorder.micSupported || liveMode}
                 aria-label={
-                  recorder.recording ? "Stop recording" : "Start recording"
+                  liveMode
+                    ? "Live voice uses the microphone continuously"
+                    : recorder.recording
+                      ? "Stop recording"
+                      : "Start recording"
                 }
                 title={
-                  recorder.micSupported
-                    ? recorder.recording
-                      ? "Stop and send"
-                      : "Start recording"
-                    : "Microphone is not supported in this browser"
+                  liveMode
+                    ? "Live voice uses the microphone continuously"
+                    : recorder.micSupported
+                      ? recorder.recording
+                        ? "Stop and send"
+                        : "Start recording"
+                      : "Microphone is not supported in this browser"
                 }
               >
                 {recorder.recording ? (
@@ -799,9 +968,11 @@ export default function VoiceAgent() {
                 value={draft}
                 onChange={(event) => setDraft(event.target.value)}
                 placeholder={
-                  recorder.recording
-                    ? `Listening… ${formatTime(recorder.elapsed)}`
-                    : "Type a message, or tap the mic to speak"
+                  liveMode
+                    ? "Type into the live conversation…"
+                    : recorder.recording
+                      ? `Listening… ${formatTime(recorder.elapsed)}`
+                      : "Type a message, or tap the mic to speak"
                 }
                 aria-label="Message"
                 maxLength={MAX_MESSAGE_CHARS}
@@ -821,7 +992,20 @@ export default function VoiceAgent() {
             </form>
 
             <div className="composer-meta">
-              {recorder.recording ? (
+              {liveMode ? (
+                <>
+                  <span className="hint">
+                    Full-duplex live voice · interrupt by speaking · usage is capped per session
+                  </span>
+                  <button
+                    type="button"
+                    className="link danger"
+                    onClick={() => void stopLive()}
+                  >
+                    End live
+                  </button>
+                </>
+              ) : recorder.recording ? (
                 <div className="recording-meta">
                   <span className="rec-dot" aria-hidden="true" />
                   <span>
@@ -873,7 +1057,11 @@ export default function VoiceAgent() {
               <div>
                 <dt>Input</dt>
                 <dd>
-                  {recorder.micSupported ? "Voice + text" : "Text only"}
+                  {liveMode
+                    ? "Live voice + text"
+                    : recorder.micSupported
+                      ? "Voice + text"
+                      : "Text only"}
                 </dd>
               </div>
               <div>

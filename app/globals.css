@@ -172,6 +172,12 @@ button {
   box-shadow: 0 0 0 3px rgba(34, 211, 238, 0.16);
 }
 
+.status-live i {
+  background: #a78bfa;
+  box-shadow: 0 0 0 3px rgba(167, 139, 250, 0.18);
+  animation: pulse 1.8s ease-in-out infinite;
+}
+
 .workspace {
   flex: 1;
   min-height: 0;
@@ -707,6 +713,11 @@ button {
   border-color: rgba(34, 211, 238, 0.35);
 }
 
+.pill-live {
+  color: #c4b5fd;
+  border-color: rgba(167, 139, 250, 0.4);
+}
+
 .steps {
   margin: 0;
   padding: 0;
@@ -844,6 +855,12 @@ button {
 
 .btn.block {
   width: 100%;
+}
+
+.btn.is-live {
+  border-color: rgba(167, 139, 250, 0.45);
+  background: rgba(139, 92, 246, 0.18);
+  color: #ddd6fe;
 }
 
 .link {

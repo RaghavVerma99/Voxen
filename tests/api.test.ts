@@ -117,6 +117,7 @@ describe("health", () => {
     expect(body.status).toBe("ok");
     expect(body.name).toBe("Voxen");
     expect(body.access_required).toBe(false);
+    expect(body.realtime_enabled).toBe(false);
     expect(body.checks).toBeUndefined();
     expect(body.budget).toBeUndefined();
     expect(body.sessions).toBeUndefined();

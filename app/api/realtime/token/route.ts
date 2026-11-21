@@ -69,7 +69,15 @@ export async function POST(request: NextRequest) {
             instructions: config.realtimeInstructions,
             audio: {
               output: { voice: config.realtimeVoice },
-              input: { turn_detection: { type: "server_vad" } },
+              input: {
+                transcription: { model: config.sttModel },
+                // Server VAD cancels an in-progress answer as soon as the user
+                // starts speaking, which provides natural full-duplex barge-in.
+                turn_detection: {
+                  type: "server_vad",
+                  interrupt_response: true,
+                },
+              },
             },
             max_output_tokens: config.realtimeMaxOutputTokens,
           },
