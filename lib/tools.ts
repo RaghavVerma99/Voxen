@@ -1,6 +1,11 @@
 import { load } from "cheerio";
 import { config } from "./config";
 import { errorMessage, logWarning } from "./logger";
+import {
+  WORKFLOW_TOOL_NAMES,
+  WORKFLOW_TOOL_SCHEMAS,
+  runWorkflowTool,
+} from "./workflow-tools";
 
 export interface ToolSchema {
   type: "function";
@@ -11,6 +16,7 @@ export interface ToolSchema {
   };
 }
 
+/** Web search is always available; workflow tools are flag-gated. */
 export const TOOL_SCHEMAS: ToolSchema[] = [
   {
     type: "function",
@@ -183,7 +189,22 @@ export async function searchWeb(query: string): Promise<string> {
   }
 }
 
-export function runTool(name: string, argumentsJson: string): Promise<string> {
+export interface ToolContext {
+  /** Server-owned session id; tools must never trust a model-supplied id. */
+  sessionId?: string;
+}
+
+export function activeToolSchemas(): ToolSchema[] {
+  return config.workflowEnabled
+    ? [...TOOL_SCHEMAS, ...WORKFLOW_TOOL_SCHEMAS]
+    : TOOL_SCHEMAS;
+}
+
+export async function runTool(
+  name: string,
+  argumentsJson: string,
+  context: ToolContext = {},
+): Promise<string> {
   if (name === "search_web") {
     let query = "";
     try {
@@ -194,5 +215,14 @@ export function runTool(name: string, argumentsJson: string): Promise<string> {
     }
     return searchWeb(query);
   }
-  return Promise.resolve(JSON.stringify({ error: `unknown tool: ${name}` }));
+
+  if (WORKFLOW_TOOL_NAMES.has(name)) {
+    if (!config.workflowEnabled) {
+      return JSON.stringify({ ok: false, reason: "workflow is disabled" });
+    }
+    const result = await runWorkflowTool(name, argumentsJson, context.sessionId);
+    if (result !== null) return result;
+  }
+
+  return JSON.stringify({ error: `unknown tool: ${name}` });
 }

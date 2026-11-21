@@ -104,6 +104,7 @@ async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
           for (const chunk of chunker.push(delta)) queueAudio(chunk);
         },
       },
+      { sessionId: options.sessionId },
     );
   } finally {
     endLlm?.();

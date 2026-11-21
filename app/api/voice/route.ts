@@ -95,6 +95,7 @@ export async function POST(request: NextRequest) {
     try {
       reply = await generateResponse(
         buildRequestMessages(sessionId, transcript),
+        { sessionId },
       );
     } catch (err) {
       releaseBudget("voice");

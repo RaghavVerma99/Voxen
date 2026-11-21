@@ -58,6 +58,7 @@ export async function POST(request: NextRequest) {
     try {
       reply = await generateResponse(
         buildRequestMessages(sessionId, message),
+        { sessionId },
       );
     } catch (err) {
       releaseBudget("chat");

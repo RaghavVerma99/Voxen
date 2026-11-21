@@ -8,7 +8,7 @@ import { config } from "./config";
 import { AppError } from "./errors";
 import { errorMessage } from "./logger";
 import { openaiClient, ensureAiConfigured } from "./openai-client";
-import { TOOL_SCHEMAS, runTool } from "./tools";
+import { activeToolSchemas, runTool, type ToolContext } from "./tools";
 import { synthesizeSpeech as synthesizeWithFailover } from "./tts";
 
 export { ensureAiConfigured };
@@ -55,7 +55,10 @@ function isFunctionCall(
   return "function" in call;
 }
 
-export async function generateResponse(messages: LlmMessage[]): Promise<string> {
+export async function generateResponse(
+  messages: LlmMessage[],
+  context: ToolContext = {},
+): Promise<string> {
   const request: LlmMessage[] = messages.slice();
 
   for (let round = 0; round <= config.maxToolRounds; round += 1) {
@@ -64,7 +67,7 @@ export async function generateResponse(messages: LlmMessage[]): Promise<string> 
       const params: ChatCompletionCreateParamsNonStreaming = {
         model: config.llmModel,
         messages: request as ChatCompletionMessageParam[],
-        tools: TOOL_SCHEMAS,
+        tools: activeToolSchemas(),
         // Newer models reject max_tokens; this is the supported cap.
         max_completion_tokens: config.maxReplyTokens,
       };
@@ -107,7 +110,11 @@ export async function generateResponse(messages: LlmMessage[]): Promise<string> 
     const outputs = await Promise.all(
       functionCalls.map(async (call) => ({
         id: call.id,
-        output: await runTool(call.function.name, call.function.arguments || "{}"),
+        output: await runTool(
+          call.function.name,
+          call.function.arguments || "{}",
+          context,
+        ),
       })),
     );
     for (const { id, output } of outputs) {
@@ -137,6 +144,7 @@ export interface StreamHandlers {
 export async function streamResponse(
   messages: LlmMessage[],
   handlers: StreamHandlers,
+  context: ToolContext = {},
 ): Promise<string> {
   const request: LlmMessage[] = messages.slice();
   let fullText = "";
@@ -147,7 +155,7 @@ export async function streamResponse(
       const params: ChatCompletionCreateParamsStreaming = {
         model: config.llmModel,
         messages: request as ChatCompletionMessageParam[],
-        tools: TOOL_SCHEMAS,
+        tools: activeToolSchemas(),
         max_completion_tokens: config.maxReplyTokens,
         stream: true,
       };
@@ -228,6 +236,7 @@ export async function streamResponse(
         output: await runTool(
           call.function.name,
           call.function.arguments || "{}",
+          context,
         ),
       })),
     );
