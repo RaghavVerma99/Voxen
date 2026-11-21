@@ -14,6 +14,9 @@ out/
 # tests
 coverage/
 
+# local persisted workflow state
+.data/
+
 # os / editor
 .DS_Store
 .vscode/

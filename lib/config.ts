@@ -139,6 +139,13 @@ export const config = {
   turnTimeoutMs: toNumber(process.env.TURN_TIMEOUT_MS, 90_000),
   sseHeartbeatMs: toNumber(process.env.SSE_HEARTBEAT_MS, 15_000),
 
+  // Narrow persisted workflow. The JSON file is a deliberate single-instance
+  // store; swap this adapter for a database before scaling horizontally.
+  workflowEnabled: process.env.WORKFLOW_ENABLED !== "false",
+  workflowStorePath:
+    process.env.WORKFLOW_STORE_PATH ?? ".data/voxen-workflow.json",
+  appointmentMinutes: toNumber(process.env.APPOINTMENT_MINUTES, 30),
+
   // Shared access code. Production refuses paid traffic unless this is a
   // long enough secret, so a misconfigured deploy cannot expose the API.
   accessCode,
