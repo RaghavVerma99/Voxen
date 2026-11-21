@@ -14,11 +14,17 @@ import { toErrorResponse } from "@/lib/http";
 import { logEvent, redactSessionId } from "@/lib/logger";
 import { sseResponse } from "@/lib/sse-response";
 import { streamTurn } from "@/lib/streaming";
+import {
+  errorCodeOf,
+  startTurnTrace,
+  type TurnTelemetry,
+} from "@/lib/telemetry";
 import { resolveSessionId } from "@/lib/validate";
 
 export async function POST(request: NextRequest) {
   const requestId = randomUUID();
   const startedAt = Date.now();
+  let trace: TurnTelemetry | undefined;
 
   try {
     const limits = guardRequest(request, "voice-stream");
@@ -64,15 +70,27 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    trace = startTurnTrace({
+      requestId,
+      sessionHash: redactSessionId(sessionId),
+    });
     consumeBudget("voice-stream");
+
+    const endStt = trace.stage("stt");
     let transcript: string;
     try {
       transcript = (await transcribeAudio(audio, request.signal)).trim();
     } catch (err) {
+      endStt();
+      trace.finish(errorCodeOf(err));
       releaseBudget("voice-stream");
       throw err;
     }
+    endStt();
+    trace.milestone("transcript");
+
     if (!transcript) {
+      trace.finish("NOTHING_HEARD");
       releaseBudget("voice-stream");
       throw new AppError("NOTHING_HEARD", "No speech detected in audio", 400);
     }
@@ -92,6 +110,7 @@ export async function POST(request: NextRequest) {
             signal,
             send,
             speak: formData.get("speak") !== "false",
+            trace,
           });
 
           logEvent("voice.stream.completed", {
@@ -109,6 +128,7 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (err) {
+    trace?.finish(errorCodeOf(err));
     return toErrorResponse(err, requestId);
   }
 }

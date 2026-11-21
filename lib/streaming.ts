@@ -4,9 +4,14 @@ import {
   buildRequestMessages,
   getHistory,
 } from "./conversation";
-import { errorMessage, logWarning } from "./logger";
+import { errorMessage, logEvent, logWarning } from "./logger";
 import { withSessionLock } from "./session-lock";
 import { SentenceChunker } from "./sse";
+import {
+  errorCodeOf,
+  incrementCounter,
+  type TurnTelemetry,
+} from "./telemetry";
 
 export interface StreamTurnOptions {
   sessionId: string;
@@ -15,6 +20,7 @@ export interface StreamTurnOptions {
   signal: AbortSignal;
   send: (event: string, data: unknown) => void;
   speak?: boolean;
+  trace?: TurnTelemetry;
 }
 
 interface TurnOutcome {
@@ -31,12 +37,21 @@ interface TurnOutcome {
  * so a slow TTS provider cannot delay the client's text or history update.
  */
 export async function streamTurn(options: StreamTurnOptions): Promise<string> {
-  const outcome = await withSessionLock(options.sessionId, () =>
-    runTurn(options),
-  );
+  try {
+    const outcome = await withSessionLock(options.sessionId, () =>
+      runTurn(options),
+    );
+    await outcome.audioChain;
+    options.trace?.milestone("complete");
 
-  await outcome.audioChain;
-  return outcome.reply;
+    const snapshot = options.trace?.finish();
+    if (snapshot) logEvent("turn.trace", { ...snapshot });
+    return outcome.reply;
+  } catch (err) {
+    const snapshot = options.trace?.finish(errorCodeOf(err));
+    if (snapshot) logEvent("turn.trace", { ...snapshot });
+    throw err;
+  }
 }
 
 async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
@@ -53,6 +68,7 @@ async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
 
     audioChain = audioChain.then(async () => {
       if (options.signal.aborted) return;
+      const endTts = options.trace?.stage("tts");
       try {
         const audio = await synthesizeSpeech(chunk, options.signal);
         if (!options.signal.aborted) {
@@ -60,6 +76,8 @@ async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
           // so a failed sentence cannot leave a gap that stalls playback.
           options.send("audio", { index: audioIndex, audio });
           audioIndex += 1;
+          options.trace?.milestone("first_audio");
+          incrementCounter("audio.sentences");
         }
       } catch (err) {
         if (options.signal.aborted) return;
@@ -67,20 +85,29 @@ async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
           requestId: options.requestId,
           message: errorMessage(err),
         });
+      } finally {
+        endTts?.();
       }
     });
   };
 
-  const reply = await streamResponse(
-    buildRequestMessages(options.sessionId, options.userContent),
-    {
-      signal: options.signal,
-      onDelta: (delta) => {
-        options.send("delta", { text: delta });
-        for (const chunk of chunker.push(delta)) queueAudio(chunk);
+  const endLlm = options.trace?.stage("llm");
+  let reply: string;
+  try {
+    reply = await streamResponse(
+      buildRequestMessages(options.sessionId, options.userContent),
+      {
+        signal: options.signal,
+        onDelta: (delta) => {
+          options.trace?.milestone("first_delta");
+          options.send("delta", { text: delta });
+          for (const chunk of chunker.push(delta)) queueAudio(chunk);
+        },
       },
-    },
-  );
+    );
+  } finally {
+    endLlm?.();
+  }
 
   for (const chunk of chunker.flush()) queueAudio(chunk);
 
@@ -94,6 +121,7 @@ async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
       history: getHistory(options.sessionId),
       spoken: options.speak !== false,
     });
+    options.trace?.milestone("done");
   }
 
   return { reply, audioChain };

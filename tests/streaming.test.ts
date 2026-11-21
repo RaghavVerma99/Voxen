@@ -18,6 +18,7 @@ import { AppError } from "@/lib/errors";
 import { budgetSnapshot } from "@/lib/ratelimit";
 import { sseResponse } from "@/lib/sse-response";
 import { streamTurn } from "@/lib/streaming";
+import { startTurnTrace } from "@/lib/telemetry";
 import type { StreamHandlers } from "@/lib/ai";
 
 const mockTranscribe = vi.mocked(provider.transcribeAudio);
@@ -205,6 +206,29 @@ describe("chat stream", () => {
       "hi",
       "Hello there.",
     ]);
+  });
+
+  it("records trace milestones and stage timings", async () => {
+    const trace = startTurnTrace({ requestId: "direct-trace" });
+    mockStream.mockImplementation(deltaStream("Hello ", "trace."));
+
+    await streamTurn({
+      sessionId: nextSession(),
+      userContent: "hi",
+      requestId: "direct-trace",
+      signal: new AbortController().signal,
+      send: () => undefined,
+      trace,
+    });
+
+    const snapshot = trace.snapshot();
+    expect(snapshot.status).toBe("ok");
+    expect(snapshot.milestonesMs.first_delta).toBeDefined();
+    expect(snapshot.milestonesMs.done).toBeDefined();
+    expect(snapshot.milestonesMs.first_audio).toBeDefined();
+    expect(snapshot.milestonesMs.complete).toBeDefined();
+    expect(snapshot.stagesMs.llm).toBeDefined();
+    expect(snapshot.stagesMs.tts).toBeDefined();
   });
 
   it("rejects invalid requests before starting the stream", async () => {

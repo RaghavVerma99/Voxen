@@ -14,6 +14,11 @@ import { toErrorResponse } from "@/lib/http";
 import { logEvent, redactSessionId } from "@/lib/logger";
 import { sseResponse } from "@/lib/sse-response";
 import { streamTurn } from "@/lib/streaming";
+import {
+  errorCodeOf,
+  startTurnTrace,
+  type TurnTelemetry,
+} from "@/lib/telemetry";
 import { resolveSessionId } from "@/lib/validate";
 
 interface ChatBody {
@@ -25,6 +30,7 @@ interface ChatBody {
 export async function POST(request: NextRequest) {
   const requestId = randomUUID();
   const startedAt = Date.now();
+  let trace: TurnTelemetry | undefined;
 
   try {
     const limits = guardRequest(request, "chat-stream");
@@ -45,6 +51,10 @@ export async function POST(request: NextRequest) {
     }
 
     const sessionId = resolveSessionId(body?.session_id);
+    trace = startTurnTrace({
+      requestId,
+      sessionHash: redactSessionId(sessionId),
+    });
     consumeBudget("chat-stream");
 
     return sseResponse(request, {
@@ -61,6 +71,7 @@ export async function POST(request: NextRequest) {
             signal,
             send,
             speak: body?.speak !== false,
+            trace,
           });
 
           logEvent("chat.stream.completed", {
@@ -77,6 +88,7 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (err) {
+    trace?.finish(errorCodeOf(err));
     return toErrorResponse(err, requestId);
   }
 }

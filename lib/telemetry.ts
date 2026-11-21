@@ -87,6 +87,18 @@ export function resetTelemetry(): void {
   samples.clear();
 }
 
+/** Stable error label for trace counters, without importing the HTTP layer. */
+export function errorCodeOf(err: unknown): string {
+  if (
+    err instanceof Error &&
+    "code" in err &&
+    typeof (err as { code?: unknown }).code === "string"
+  ) {
+    return (err as { code: string }).code;
+  }
+  return "INTERNAL";
+}
+
 export interface TurnTelemetry {
   milestone(name: Milestone): void;
   stage(name: Stage): () => void;
