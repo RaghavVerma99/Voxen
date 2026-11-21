@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { NextRequest } from "next/server";
-import { config, isAiConfigured } from "@/lib/config";
+import { config, isAiConfigured, ttsProviderChain } from "@/lib/config";
 import { sessionStats } from "@/lib/conversation";
 import { guardRequest, rateLimitHeaders } from "@/lib/guard";
 import { jsonOk, toErrorResponse } from "@/lib/http";
@@ -31,6 +31,7 @@ export async function GET(request: NextRequest) {
       payload.checks = {
         ai: isAiConfigured() ? "configured" : "missing",
         search: activeSearchProvider(),
+        tts: ttsProviderChain(),
       };
       payload.budget = budgetSnapshot();
       payload.sessions = stats.sessions;

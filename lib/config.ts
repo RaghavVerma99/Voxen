@@ -155,6 +155,18 @@ export const config = {
 
 export const isAiConfigured = (): boolean => config.openaiApiKey.trim().length > 0;
 
+/** Ordered, de-duplicated TTS providers used for one sentence. */
+export function ttsProviderChain(): TtsProvider[] {
+  const chain: TtsProvider[] = [config.ttsProvider];
+  if (
+    config.ttsFallbackProvider !== "none" &&
+    config.ttsFallbackProvider !== config.ttsProvider
+  ) {
+    chain.push(config.ttsFallbackProvider);
+  }
+  return chain;
+}
+
 /** True when the configured access code meets the minimum length. */
 export const isAccessGateConfigured = (): boolean =>
   config.accessCode.length >= config.minAccessCodeLength;

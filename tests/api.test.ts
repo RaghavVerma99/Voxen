@@ -133,7 +133,10 @@ describe("health", () => {
       const body = await bodyOf(response);
 
       expect(response.status).toBe(200);
-      expect(body.checks).toMatchObject({ ai: "configured" });
+      expect(body.checks).toMatchObject({
+        ai: "configured",
+        tts: ["realtime", "speech"],
+      });
       expect(body.budget).toMatchObject({ limit: config.dailyRequestBudget });
       expect(typeof body.sessions).toBe("number");
     } finally {
@@ -182,9 +185,33 @@ describe("ready", () => {
     try {
       const response = await getReady();
       expect(response.status).toBe(200);
-      expect(await bodyOf(response)).toEqual({ status: "ready" });
+      expect(await bodyOf(response)).toMatchObject({
+        status: "ready",
+        tts: {
+          primary: "realtime",
+          fallback: "speech",
+          chain: ["realtime", "speech"],
+        },
+      });
     } finally {
       config.openaiApiKey = originalKey;
+    }
+  });
+
+  it("reports the configured TTS failover chain", async () => {
+    const originalKey = config.openaiApiKey;
+    const originalFallback = config.ttsFallbackProvider;
+    config.openaiApiKey = "test-key";
+    config.ttsFallbackProvider = "none";
+
+    try {
+      const response = await getReady();
+      expect(await bodyOf(response)).toMatchObject({
+        tts: { fallback: "none", chain: ["realtime"] },
+      });
+    } finally {
+      config.openaiApiKey = originalKey;
+      config.ttsFallbackProvider = originalFallback;
     }
   });
 

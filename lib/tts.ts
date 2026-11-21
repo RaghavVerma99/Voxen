@@ -1,4 +1,4 @@
-import { config, type TtsProvider } from "./config";
+import { config, ttsProviderChain, type TtsProvider } from "./config";
 import { AppError } from "./errors";
 import { errorMessage, logWarning } from "./logger";
 import { openaiClient } from "./openai-client";
@@ -50,11 +50,7 @@ function isAbortError(err: unknown): boolean {
 }
 
 function providerChain(): SpeechAdapter[] {
-  const providers: TtsProviderName[] = [config.ttsProvider];
-  if (config.ttsFallbackProvider !== "none") {
-    providers.push(config.ttsFallbackProvider);
-  }
-  return [...new Set(providers)].map((name) => adapters[name]);
+  return ttsProviderChain().map((name) => adapters[name]);
 }
 
 /**

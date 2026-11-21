@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import {
   isAiConfigured,
   isProductionAccessMisconfigured,
+  ttsProviderChain,
 } from "@/lib/config";
 import { jsonOk } from "@/lib/http";
 
@@ -11,6 +12,7 @@ export const dynamic = "force-dynamic";
 /**
  * Readiness probe for orchestrators. Liveness stays at /api/health; this
  * endpoint fails when the process is up but cannot safely serve requests.
+ * The TTS chain is reported so a deployment can confirm its migration state.
  */
 export async function GET() {
   const requestId = randomUUID();
@@ -31,5 +33,15 @@ export async function GET() {
     );
   }
 
-  return jsonOk({ status: "ready" }, requestId);
+  return jsonOk(
+    {
+      status: "ready",
+      tts: {
+        primary: ttsProviderChain()[0],
+        fallback: ttsProviderChain()[1] ?? "none",
+        chain: ttsProviderChain(),
+      },
+    },
+    requestId,
+  );
 }
