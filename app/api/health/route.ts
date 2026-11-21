@@ -6,6 +6,7 @@ import { guardRequest, rateLimitHeaders } from "@/lib/guard";
 import { jsonOk, toErrorResponse } from "@/lib/http";
 import { budgetSnapshot } from "@/lib/ratelimit";
 import { activeSearchProvider } from "@/lib/tools";
+import { workflowStats } from "@/lib/workflow-store";
 
 export async function GET(request: NextRequest) {
   const requestId = randomUUID();
@@ -35,6 +36,7 @@ export async function GET(request: NextRequest) {
       };
       payload.budget = budgetSnapshot();
       payload.sessions = stats.sessions;
+      if (config.workflowEnabled) payload.workflow = await workflowStats();
     }
 
     return jsonOk(

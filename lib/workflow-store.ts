@@ -40,10 +40,19 @@ export interface WorkflowState {
   updatedAt: string;
 }
 
+export interface SharedTranscript {
+  token: string;
+  sessionId: string;
+  summary: string;
+  transcript: string;
+  createdAt: string;
+}
+
 interface PersistedState {
   version: 1;
   appointments: Appointment[];
   workflows: Record<string, WorkflowState>;
+  shares?: Record<string, SharedTranscript>;
 }
 
 export type BookingResult =
@@ -51,7 +60,7 @@ export type BookingResult =
   | { ok: false; reason: "slot_taken" };
 
 function emptyState(): PersistedState {
-  return { version: 1, appointments: [], workflows: {} };
+  return { version: 1, appointments: [], workflows: {}, shares: {} };
 }
 
 function storePath(): string {
@@ -77,7 +86,11 @@ async function readState(): Promise<PersistedState> {
     ) {
       throw new Error("unsupported workflow store version");
     }
-    return parsed as PersistedState;
+    return {
+      ...(parsed as PersistedState),
+      shares:
+        parsed.shares && typeof parsed.shares === "object" ? parsed.shares : {},
+    };
   } catch (err) {
     logWarning("workflow.store_corrupt", { message: errorMessage(err) });
     throw new AppError(
@@ -254,6 +267,34 @@ export async function listAppointments(
         item.status === "confirmed" && (!sessionId || item.sessionId === sessionId),
     )
     .sort((a, b) => a.startsAt.localeCompare(b.startsAt));
+}
+
+export async function createShare(input: {
+  sessionId: string;
+  summary: string;
+  transcript: string;
+}): Promise<SharedTranscript> {
+  return withState((state) => {
+    const shares = state.shares ?? {};
+    let token = randomUUID().replace(/-/g, "");
+    while (shares[token]) token = randomUUID().replace(/-/g, "");
+
+    const share: SharedTranscript = {
+      token,
+      sessionId: input.sessionId,
+      summary: input.summary,
+      transcript: input.transcript,
+      createdAt: nowIso(),
+    };
+    shares[token] = share;
+    state.shares = shares;
+    return share;
+  });
+}
+
+export async function getShare(token: string): Promise<SharedTranscript | null> {
+  const state = await readState();
+  return state.shares?.[token] ?? null;
 }
 
 export async function workflowStats(): Promise<{

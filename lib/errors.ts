@@ -15,6 +15,7 @@ export type ErrorCode =
   | "AUDIO_TOO_LONG"
   | "INVALID_AUDIO_DURATION"
   | "NOTHING_HEARD"
+  | "NOT_FOUND"
   | "STT_FAILED"
   | "LLM_FAILED"
   | "TTS_FAILED"
