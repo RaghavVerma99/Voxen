@@ -19,6 +19,7 @@ export type ErrorCode =
   | "STT_FAILED"
   | "LLM_FAILED"
   | "TTS_FAILED"
+  | "REALTIME_FAILED"
   | "TURN_TIMEOUT";
 
 export type ErrorHeaders = Record<string, string>;

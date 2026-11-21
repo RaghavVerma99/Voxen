@@ -146,6 +146,18 @@ export const config = {
     process.env.WORKFLOW_STORE_PATH ?? ".data/voxen-workflow.json",
   appointmentMinutes: toNumber(process.env.APPOINTMENT_MINUTES, 30),
 
+  // Optional low-latency WebRTC transport. Off by default: the cascade path
+  // remains the production default until a deployment opts in.
+  realtimeEnabled: process.env.REALTIME_ENABLED === "true",
+  realtimeModel: process.env.REALTIME_MODEL ?? "gpt-realtime-2.1-mini",
+  realtimeVoice: process.env.REALTIME_VOICE ?? "marin",
+  realtimeInstructions:
+    process.env.REALTIME_INSTRUCTIONS ??
+    "You are Voxen, a concise voice assistant. Keep replies short and spoken naturally. If asked to schedule, confirm the time before booking.",
+  realtimeMaxSessions: toNumber(process.env.REALTIME_MAX_SESSIONS, 3),
+  realtimeMaxAudioSeconds: toNumber(process.env.REALTIME_MAX_AUDIO_SECONDS, 180),
+  realtimeMaxOutputTokens: toNumber(process.env.REALTIME_MAX_OUTPUT_TOKENS, 4_000),
+
   // Shared access code. Production refuses paid traffic unless this is a
   // long enough secret, so a misconfigured deploy cannot expose the API.
   accessCode,
