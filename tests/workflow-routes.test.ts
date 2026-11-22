@@ -6,10 +6,11 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { GET as getTranscript } from "@/app/api/transcript/[token]/route";
 import { GET as getWorkflow } from "@/app/api/workflow/route";
+import { POST as postRevoke } from "@/app/api/workflow/share/revoke/route";
 import { POST as postSummary } from "@/app/api/workflow/summary/route";
 import { config } from "@/lib/config";
 import { appendTurn } from "@/lib/conversation";
-import { updateWorkflow } from "@/lib/workflow-store";
+import { createShare, updateWorkflow } from "@/lib/workflow-store";
 
 let directory = "";
 let counter = 0;
@@ -24,10 +25,12 @@ beforeEach(async () => {
   config.workflowEnabled = true;
   config.accessCode = "";
   config.rateLimitRequests = 1_000;
+  config.shareTtlMs = 24 * 60 * 60 * 1000;
   counter += 1;
 });
 
 afterAll(async () => {
+  config.shareTtlMs = 24 * 60 * 60 * 1000;
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
@@ -82,6 +85,7 @@ describe("workflow routes", () => {
 
     expect(response.status).toBe(200);
     expect(body.share_url).toMatch(/^\/api\/transcript\/[a-f0-9]{32}$/);
+    expect(body.share_expires_at).toEqual(expect.any(String));
     expect(body.summary).toMatchObject({
       headline: expect.any(String),
       action_items: expect.any(Array),
@@ -109,4 +113,49 @@ describe("workflow routes", () => {
       detail: { error_code: "NOT_FOUND" },
     });
   });
+
+  it("revokes a share only for its owning session", async () => {
+    const id = session();
+    const share = await createShare({
+      sessionId: id,
+      summary: "Summary",
+      transcript: "Transcript",
+    });
+
+    const wrongOwner = await postRevoke(revokeRequest("other-session", share.token));
+    expect(await bodyOf(wrongOwner)).toEqual({ revoked: false });
+
+    const revoked = await postRevoke(revokeRequest(id, share.token));
+    expect(await bodyOf(revoked)).toEqual({ revoked: true });
+
+    const response = await getTranscript(
+      new NextRequest(`http://localhost/api/transcript/${share.token}`),
+      { params: Promise.resolve({ token: share.token }) },
+    );
+    expect(response.status).toBe(404);
+  });
+
+  it("refuses an expired share token", async () => {
+    const id = session();
+    config.shareTtlMs = -1;
+    const share = await createShare({
+      sessionId: id,
+      summary: "Expired",
+      transcript: "Expired transcript",
+    });
+
+    const response = await getTranscript(
+      new NextRequest(`http://localhost/api/transcript/${share.token}`),
+      { params: Promise.resolve({ token: share.token }) },
+    );
+    expect(response.status).toBe(404);
+  });
 });
+
+function revokeRequest(sessionId: string, token: string): NextRequest {
+  return new NextRequest("http://localhost/api/workflow/share/revoke", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, share_token: token }),
+  });
+}

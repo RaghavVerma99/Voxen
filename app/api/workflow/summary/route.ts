@@ -56,6 +56,7 @@ export async function POST(request: NextRequest) {
         },
         share_token: share.token,
         share_url: `/api/transcript/${share.token}`,
+        share_expires_at: share.expiresAt,
       },
       requestId,
       200,

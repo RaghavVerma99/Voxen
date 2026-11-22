@@ -8,8 +8,11 @@ import { AppError } from "@/lib/errors";
 import {
   bookAppointment,
   cancelAppointment,
+  createShare,
+  getShare,
   getWorkflow,
   listAppointments,
+  revokeShare,
   updateWorkflow,
   workflowStats,
 } from "@/lib/workflow-store";
@@ -21,10 +24,14 @@ beforeEach(async () => {
   directory = await mkdtemp(join(tmpdir(), "voxen-workflow-"));
   config.workflowStorePath = join(directory, "workflow.json");
   config.appointmentMinutes = 30;
+  config.confirmationTtlMs = 10 * 60 * 1000;
+  config.shareTtlMs = 24 * 60 * 60 * 1000;
   counter += 1;
 });
 
 afterAll(async () => {
+  config.confirmationTtlMs = 10 * 60 * 1000;
+  config.shareTtlMs = 24 * 60 * 60 * 1000;
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
@@ -92,5 +99,60 @@ describe("persisted appointment store", () => {
     await bookAppointment({ sessionId: id, startsAt: "2027-01-14T10:00:00.000Z" });
 
     expect(await workflowStats()).toMatchObject({ appointments: 1, workflows: 1 });
+  });
+
+  it("records who created, confirmed, and cancelled an appointment", async () => {
+    const id = session();
+    const booked = await bookAppointment({
+      sessionId: id,
+      startsAt: "2027-01-15T10:00:00.000Z",
+      source: "sse",
+    });
+    if (!booked.ok) throw new Error("expected booking to succeed");
+
+    expect(booked.appointment).toMatchObject({
+      source: "sse",
+      createdBy: "sse",
+      confirmedAt: expect.any(String),
+    });
+    expect(
+      await cancelAppointment(
+        booked.appointment.confirmationCode,
+        id,
+        "realtime",
+      ),
+    ).toBe(true);
+
+    const { readFile } = await import("node:fs/promises");
+    const persisted = JSON.parse(await readFile(config.workflowStorePath, "utf8")) as {
+      appointments: Array<Record<string, unknown>>;
+    };
+    expect(persisted.appointments[0]).toMatchObject({
+      cancelledBy: "realtime",
+      cancelledAt: expect.any(String),
+    });
+  });
+
+  it("expires and revokes share links", async () => {
+    const id = session();
+    const share = await createShare({
+      sessionId: id,
+      summary: "Summary",
+      transcript: "Transcript",
+    });
+    expect(share.expiresAt).not.toBe(share.createdAt);
+    expect((await getShare(share.token))?.token).toBe(share.token);
+
+    expect(await revokeShare(share.token, "other-session")).toBe(false);
+    expect(await revokeShare(share.token, id)).toBe(true);
+    expect(await getShare(share.token)).toBeNull();
+
+    config.shareTtlMs = -1;
+    const expired = await createShare({
+      sessionId: id,
+      summary: "Expired",
+      transcript: "Expired transcript",
+    });
+    expect(await getShare(expired.token)).toBeNull();
   });
 });

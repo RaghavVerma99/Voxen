@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
@@ -19,6 +19,8 @@ export interface AppointmentDraft {
   name?: string;
 }
 
+export type WorkflowSource = "sse" | "realtime" | "system";
+
 export interface Appointment {
   id: string;
   confirmationCode: string;
@@ -29,6 +31,11 @@ export interface Appointment {
   name?: string;
   status: "confirmed" | "cancelled";
   createdAt: string;
+  source: WorkflowSource;
+  createdBy: WorkflowSource;
+  confirmedAt: string;
+  cancelledAt?: string;
+  cancelledBy?: WorkflowSource;
 }
 
 export interface WorkflowState {
@@ -37,6 +44,9 @@ export interface WorkflowState {
   draft: AppointmentDraft;
   appointmentId?: string;
   handoffReason?: string;
+  /** Hash of the one-time token returned by prepare_appointment. */
+  confirmationTokenHash?: string;
+  confirmationExpiresAt?: string;
   updatedAt: string;
 }
 
@@ -46,6 +56,8 @@ export interface SharedTranscript {
   summary: string;
   transcript: string;
   createdAt: string;
+  expiresAt: string;
+  revokedAt?: string;
 }
 
 interface PersistedState {
@@ -58,6 +70,13 @@ interface PersistedState {
 export type BookingResult =
   | { ok: true; appointment: Appointment }
   | { ok: false; reason: "slot_taken" };
+
+export type ConfirmationResult =
+  | { ok: true; appointment: Appointment }
+  | {
+      ok: false;
+      reason: "no_preparation" | "invalid_token" | "expired_token" | "slot_taken";
+    };
 
 function emptyState(): PersistedState {
   return { version: 1, appointments: [], workflows: {}, shares: {} };
@@ -88,8 +107,22 @@ async function readState(): Promise<PersistedState> {
     ) {
       throw new Error("unsupported workflow store version");
     }
+    const state = parsed as PersistedState;
     return {
-      ...(parsed as PersistedState),
+      version: 1,
+      appointments: state.appointments.map((item) => ({
+        ...item,
+        source: item.source ?? "system",
+        createdBy: item.createdBy ?? item.source ?? "system",
+        confirmedAt: item.confirmedAt ?? item.createdAt,
+        ...(item.status === "cancelled"
+          ? {
+              cancelledAt: item.cancelledAt ?? item.createdAt,
+              cancelledBy: item.cancelledBy ?? "system",
+            }
+          : {}),
+      })),
+      workflows: state.workflows,
       shares:
         parsed.shares && typeof parsed.shares === "object" ? parsed.shares : {},
     };
@@ -145,6 +178,33 @@ function confirmationCode(): string {
   return `VXN-${randomUUID().replace(/-/g, "").slice(0, 6).toUpperCase()}`;
 }
 
+function hashConfirmationToken(token: string): string {
+  return createHash("sha256").update(token).digest("hex");
+}
+
+/** Hashes are fixed-length hex strings, so a constant-time compare is safe. */
+function sameHash(left: string, right: string): boolean {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && a.length === 64 && timingSafeEqual(a, b);
+}
+
+/** Confirmation secrets and share metadata stay server-side in public payloads. */
+function publicWorkflow(workflow: WorkflowState | null): WorkflowState | null {
+  if (!workflow) return null;
+  const {
+    confirmationTokenHash: _hash,
+    confirmationExpiresAt: _expiresAt,
+    ...safe
+  } = workflow;
+  return safe;
+}
+
+function clearConfirmation(workflow: WorkflowState): void {
+  workflow.confirmationTokenHash = undefined;
+  workflow.confirmationExpiresAt = undefined;
+}
+
 function ensureWorkflow(state: PersistedState, sessionId: string): WorkflowState {
   let workflow = state.workflows[sessionId];
   if (!workflow) {
@@ -163,7 +223,7 @@ export async function getWorkflow(
   sessionId: string,
 ): Promise<WorkflowState | null> {
   const state = await readState();
-  return state.workflows[sessionId] ?? null;
+  return publicWorkflow(state.workflows[sessionId] ?? null);
 }
 
 export async function updateWorkflow(
@@ -172,6 +232,8 @@ export async function updateWorkflow(
     stage?: WorkflowStage;
     draft?: AppointmentDraft;
     handoffReason?: string;
+    confirmationTokenHash?: string;
+    confirmationExpiresAt?: string;
   },
 ): Promise<WorkflowState> {
   return withState((state) => {
@@ -181,9 +243,63 @@ export async function updateWorkflow(
     if (patch.handoffReason !== undefined) {
       workflow.handoffReason = patch.handoffReason;
     }
+    if (patch.confirmationTokenHash !== undefined) {
+      workflow.confirmationTokenHash = patch.confirmationTokenHash;
+    }
+    if (patch.confirmationExpiresAt !== undefined) {
+      workflow.confirmationExpiresAt = patch.confirmationExpiresAt;
+    }
     workflow.updatedAt = nowIso();
-    return workflow;
+    return publicWorkflow(workflow)!;
   });
+}
+
+function bookInState(
+  state: PersistedState,
+  input: {
+    sessionId: string;
+    startsAt: string;
+    email?: string;
+    name?: string;
+    source: WorkflowSource;
+  },
+): BookingResult {
+  const startsAt = new Date(input.startsAt).toISOString();
+  const endsAt = new Date(
+    Date.parse(startsAt) + config.appointmentMinutes * 60_000,
+  ).toISOString();
+
+  const taken = state.appointments.some(
+    (item) => item.status === "confirmed" && item.startsAt === startsAt,
+  );
+  if (taken) return { ok: false, reason: "slot_taken" };
+
+  const createdAt = nowIso();
+  const appointment: Appointment = {
+    id: randomUUID(),
+    confirmationCode: confirmationCode(),
+    sessionId: input.sessionId,
+    startsAt,
+    endsAt,
+    ...(input.email ? { email: input.email } : {}),
+    ...(input.name ? { name: input.name } : {}),
+    status: "confirmed",
+    createdAt,
+    source: input.source,
+    createdBy: input.source,
+    confirmedAt: createdAt,
+  };
+  state.appointments.push(appointment);
+
+  const workflow = ensureWorkflow(state, input.sessionId);
+  workflow.stage = "confirmed";
+  workflow.draft = { startsAt, email: input.email, name: input.name };
+  workflow.appointmentId = appointment.id;
+  workflow.handoffReason = undefined;
+  clearConfirmation(workflow);
+  workflow.updatedAt = createdAt;
+
+  return { ok: true, appointment };
 }
 
 export async function bookAppointment(input: {
@@ -191,51 +307,100 @@ export async function bookAppointment(input: {
   startsAt: string;
   email?: string;
   name?: string;
+  source?: WorkflowSource;
 }): Promise<BookingResult> {
   const parsed = new Date(input.startsAt);
   if (!Number.isFinite(parsed.getTime())) {
     throw new AppError("INVALID_BODY", "Appointment time must be an ISO date", 400);
   }
 
-  return withState((state) => {
-    const startsAt = parsed.toISOString();
-    const endsAt = new Date(
-      Date.parse(startsAt) + config.appointmentMinutes * 60_000,
-    ).toISOString();
-
-    const taken = state.appointments.some(
-      (item) =>
-        item.status === "confirmed" && item.startsAt === startsAt,
-    );
-    if (taken) return { ok: false, reason: "slot_taken" };
-
-    const appointment: Appointment = {
-      id: randomUUID(),
-      confirmationCode: confirmationCode(),
+  return withState((state) =>
+    bookInState(state, {
       sessionId: input.sessionId,
-      startsAt,
-      endsAt,
-      ...(input.email ? { email: input.email } : {}),
-      ...(input.name ? { name: input.name } : {}),
-      status: "confirmed",
-      createdAt: nowIso(),
-    };
-    state.appointments.push(appointment);
+      startsAt: parsed.toISOString(),
+      email: input.email,
+      name: input.name,
+      source: input.source ?? "system",
+    }),
+  );
+}
 
+export async function prepareConfirmation(input: {
+  sessionId: string;
+  startsAt: string;
+  email?: string;
+  name?: string;
+}): Promise<{ token: string; expiresAt: string; startsAt: string; endsAt: string }> {
+  const startsAt = new Date(input.startsAt).toISOString();
+  const endsAt = new Date(
+    Date.parse(startsAt) + config.appointmentMinutes * 60_000,
+  ).toISOString();
+  const token = randomBytes(24).toString("base64url");
+  const expiresAt = new Date(
+    Date.now() + Math.max(0, config.confirmationTtlMs),
+  ).toISOString();
+
+  await withState((state) => {
     const workflow = ensureWorkflow(state, input.sessionId);
-    workflow.stage = "confirmed";
-    workflow.draft = { startsAt, email: input.email, name: input.name };
-    workflow.appointmentId = appointment.id;
+    workflow.stage = "awaiting_confirmation";
+    workflow.draft = { startsAt, email: input.email, ...(input.name ? { name: input.name } : {}) };
+    workflow.confirmationTokenHash = hashConfirmationToken(token);
+    workflow.confirmationExpiresAt = expiresAt;
+    workflow.appointmentId = undefined;
     workflow.handoffReason = undefined;
     workflow.updatedAt = nowIso();
+  });
 
-    return { ok: true, appointment };
+  return { token, expiresAt, startsAt, endsAt };
+}
+
+export async function confirmReservation(input: {
+  sessionId: string;
+  token: string;
+  source: WorkflowSource;
+}): Promise<ConfirmationResult> {
+  return withState((state) => {
+    const workflow = state.workflows[input.sessionId];
+    if (
+      !workflow ||
+      workflow.stage !== "awaiting_confirmation" ||
+      !workflow.draft.startsAt ||
+      !workflow.confirmationTokenHash
+    ) {
+      return { ok: false as const, reason: "no_preparation" };
+    }
+
+    const expiresAt = workflow.confirmationExpiresAt
+      ? Date.parse(workflow.confirmationExpiresAt)
+      : Number.NaN;
+    if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) {
+      clearConfirmation(workflow);
+      workflow.stage = "collecting";
+      workflow.updatedAt = nowIso();
+      return { ok: false as const, reason: "expired_token" };
+    }
+
+    if (!sameHash(hashConfirmationToken(input.token), workflow.confirmationTokenHash)) {
+      return { ok: false as const, reason: "invalid_token" };
+    }
+
+    // The token is single-use; consume it before side effects so a retry needs
+    // a fresh prepare step even if the slot was taken in the meantime.
+    clearConfirmation(workflow);
+    return bookInState(state, {
+      sessionId: input.sessionId,
+      startsAt: workflow.draft.startsAt,
+      email: workflow.draft.email,
+      name: workflow.draft.name,
+      source: input.source,
+    });
   });
 }
 
 export async function cancelAppointment(
   confirmationCode: string,
   sessionId?: string,
+  source: WorkflowSource = "system",
 ): Promise<boolean> {
   return withState((state) => {
     const appointment = state.appointments.find(
@@ -247,11 +412,14 @@ export async function cancelAppointment(
     if (!appointment) return false;
 
     appointment.status = "cancelled";
+    appointment.cancelledAt = nowIso();
+    appointment.cancelledBy = source;
     if (appointment.sessionId) {
       const workflow = state.workflows[appointment.sessionId];
       if (workflow?.appointmentId === appointment.id) {
         workflow.stage = "idle";
         workflow.appointmentId = undefined;
+        clearConfirmation(workflow);
         workflow.updatedAt = nowIso();
       }
     }
@@ -281,12 +449,16 @@ export async function createShare(input: {
     let token = randomUUID().replace(/-/g, "");
     while (shares[token]) token = randomUUID().replace(/-/g, "");
 
+    const createdAt = nowIso();
     const share: SharedTranscript = {
       token,
       sessionId: input.sessionId,
       summary: input.summary,
       transcript: input.transcript,
-      createdAt: nowIso(),
+      createdAt,
+      expiresAt: new Date(
+        Date.parse(createdAt) + Math.max(0, config.shareTtlMs),
+      ).toISOString(),
     };
     shares[token] = share;
     state.shares = shares;
@@ -296,7 +468,23 @@ export async function createShare(input: {
 
 export async function getShare(token: string): Promise<SharedTranscript | null> {
   const state = await readState();
-  return state.shares?.[token] ?? null;
+  const share = state.shares?.[token];
+  if (!share || share.revokedAt) return null;
+  const expiresAt = share.expiresAt ? Date.parse(share.expiresAt) : Number.NaN;
+  if (!Number.isFinite(expiresAt) || expiresAt <= Date.now()) return null;
+  return share;
+}
+
+export async function revokeShare(
+  token: string,
+  sessionId: string,
+): Promise<boolean> {
+  return withState((state) => {
+    const share = state.shares?.[token];
+    if (!share || share.sessionId !== sessionId || share.revokedAt) return false;
+    share.revokedAt = nowIso();
+    return true;
+  });
 }
 
 export async function workflowStats(): Promise<{

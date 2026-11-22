@@ -6,6 +6,7 @@ import {
   WORKFLOW_TOOL_SCHEMAS,
   runWorkflowTool,
 } from "./workflow-tools";
+import type { WorkflowSource } from "./workflow-store";
 
 export interface ToolSchema {
   type: "function";
@@ -192,6 +193,8 @@ export async function searchWeb(query: string): Promise<string> {
 export interface ToolContext {
   /** Server-owned session id; tools must never trust a model-supplied id. */
   sessionId?: string;
+  /** Which transport initiated the tool, recorded on appointment audit fields. */
+  source?: WorkflowSource;
 }
 
 export function activeToolSchemas(): ToolSchema[] {
@@ -220,7 +223,12 @@ export async function runTool(
     if (!config.workflowEnabled) {
       return JSON.stringify({ ok: false, reason: "workflow is disabled" });
     }
-    const result = await runWorkflowTool(name, argumentsJson, context.sessionId);
+    const result = await runWorkflowTool(
+      name,
+      argumentsJson,
+      context.sessionId,
+      context.source,
+    );
     if (result !== null) return result;
   }
 

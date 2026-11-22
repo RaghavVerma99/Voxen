@@ -28,6 +28,7 @@ export async function GET(
         summary: share.summary,
         transcript: share.transcript,
         created_at: share.createdAt,
+        expires_at: share.expiresAt,
       },
       requestId,
     );

@@ -69,7 +69,10 @@ export async function POST(request: NextRequest) {
       throw new AppError("PAYLOAD_TOO_LARGE", "Tool arguments are too large.", 413);
     }
 
-    const output = await runTool(name, argumentsJson, { sessionId });
+    const output = await runTool(name, argumentsJson, {
+      sessionId,
+      source: "realtime",
+    });
     return jsonOk(
       { session_id: sessionId, call_id: callId, name, output },
       requestId,

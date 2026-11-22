@@ -5,7 +5,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 
 import { config } from "@/lib/config";
 import { activeToolSchemas, runTool } from "@/lib/tools";
-import { getWorkflow } from "@/lib/workflow-store";
+import { getWorkflow, listAppointments } from "@/lib/workflow-store";
 
 let directory = "";
 let counter = 0;
@@ -28,11 +28,15 @@ beforeEach(async () => {
   config.workflowStorePath = join(directory, "workflow.json");
   config.workflowEnabled = true;
   config.appointmentMinutes = 30;
+  config.confirmationTtlMs = 10 * 60 * 1000;
+  config.shareTtlMs = 24 * 60 * 60 * 1000;
   counter += 1;
 });
 
 afterAll(async () => {
   config.workflowEnabled = true;
+  config.confirmationTtlMs = 10 * 60 * 1000;
+  config.shareTtlMs = 24 * 60 * 60 * 1000;
   if (directory) await rm(directory, { recursive: true, force: true });
 });
 
@@ -42,6 +46,12 @@ function session(): string {
 
 describe("workflow tools", () => {
   it("exposes workflow tools only when the flag is enabled", async () => {
+    const confirmSchema = activeToolSchemas().find(
+      (tool) => tool.function.name === "confirm_appointment",
+    );
+    expect(confirmSchema?.function.parameters).toMatchObject({
+      required: ["confirm", "confirmation_token"],
+    });
     expect(activeToolSchemas().map((tool) => tool.function.name)).toEqual([
       "search_web",
       "find_appointment_slots",
@@ -88,6 +98,11 @@ describe("workflow tools", () => {
       starts_at: startsAt,
       requires_confirmation: true,
     });
+    expect(typeof prepared.confirmation_token).toBe("string");
+    expect(prepared.confirmation_expires_at).toEqual(expect.any(String));
+    expect(JSON.stringify(await getWorkflow(id))).not.toContain(
+      String(prepared.confirmation_token),
+    );
     expect((await getWorkflow(id))?.stage).toBe("awaiting_confirmation");
 
     const notConfirmed = parse(
@@ -97,21 +112,78 @@ describe("workflow tools", () => {
     );
     expect(notConfirmed.ok).toBe(false);
 
+    const wrongToken = parse(
+      await runTool(
+        "confirm_appointment",
+        JSON.stringify({ confirm: true, confirmation_token: "wrong" }),
+        { sessionId: id },
+      ),
+    );
+    expect(wrongToken.ok).toBe(false);
+
     const confirmed = parse(
-      await runTool("confirm_appointment", JSON.stringify({ confirm: true }), {
-        sessionId: id,
-      }),
+      await runTool(
+        "confirm_appointment",
+        JSON.stringify({
+          confirm: true,
+          confirmation_token: prepared.confirmation_token,
+        }),
+        { sessionId: id, source: "realtime" },
+      ),
     );
     expect(confirmed.ok).toBe(true);
     expect(confirmed.confirmation_code).toMatch(/^VXN-/);
     expect((await getWorkflow(id))?.stage).toBe("confirmed");
 
+    const [appointment] = await listAppointments(id);
+    expect(appointment).toMatchObject({
+      source: "realtime",
+      createdBy: "realtime",
+      confirmedAt: expect.any(String),
+    });
+
     const secondAttempt = parse(
-      await runTool("confirm_appointment", JSON.stringify({ confirm: true }), {
-        sessionId: id,
-      }),
+      await runTool(
+        "confirm_appointment",
+        JSON.stringify({
+          confirm: true,
+          confirmation_token: prepared.confirmation_token,
+        }),
+        { sessionId: id },
+      ),
     );
     expect(secondAttempt.ok).toBe(false);
+  });
+
+  it("expires a confirmation token", async () => {
+    config.confirmationTtlMs = -1;
+    const id = session();
+    const prepared = parse(
+      await runTool(
+        "prepare_appointment",
+        JSON.stringify({
+          starts_at: `${nextWeekday()}T12:00:00.000Z`,
+          email: "user@example.com",
+        }),
+        { sessionId: id },
+      ),
+    );
+
+    const result = parse(
+      await runTool(
+        "confirm_appointment",
+        JSON.stringify({
+          confirm: true,
+          confirmation_token: prepared.confirmation_token,
+        }),
+        { sessionId: id },
+      ),
+    );
+    expect(result).toEqual({
+      ok: false,
+      reason: "the confirmation token expired; prepare the slot again",
+    });
+    expect(await listAppointments(id)).toEqual([]);
   });
 
   it("rejects malformed scheduling arguments without booking", async () => {
@@ -140,9 +212,14 @@ describe("workflow tools", () => {
     expect(prepared.ok).toBe(true);
 
     const confirmed = parse(
-      await runTool("confirm_appointment", JSON.stringify({ confirm: true }), {
-        sessionId: id,
-      }),
+      await runTool(
+        "confirm_appointment",
+        JSON.stringify({
+          confirm: true,
+          confirmation_token: prepared.confirmation_token,
+        }),
+        { sessionId: id },
+      ),
     );
     const code = confirmed.confirmation_code as string;
 

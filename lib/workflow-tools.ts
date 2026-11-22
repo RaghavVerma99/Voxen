@@ -2,11 +2,12 @@ import { config } from "./config";
 import { AppError } from "./errors";
 import type { ToolSchema } from "./tools";
 import {
-  bookAppointment,
   cancelAppointment,
-  getWorkflow,
+  confirmReservation,
   listAppointments,
+  prepareConfirmation,
   updateWorkflow,
+  type WorkflowSource,
 } from "./workflow-store";
 
 export const WORKFLOW_TOOL_NAMES = new Set([
@@ -65,7 +66,7 @@ export const WORKFLOW_TOOL_SCHEMAS: ToolSchema[] = [
     function: {
       name: "confirm_appointment",
       description:
-        "Book the prepared appointment. Only call this after the user clearly confirms, with confirm set to true.",
+        "Book the prepared appointment. Only call this after the user clearly confirms. Pass the one-time confirmation_token returned by prepare_appointment.",
       parameters: {
         type: "object",
         properties: {
@@ -73,8 +74,12 @@ export const WORKFLOW_TOOL_SCHEMAS: ToolSchema[] = [
             type: "boolean",
             description: "Must be true after the user explicitly agrees.",
           },
+          confirmation_token: {
+            type: "string",
+            description: "The one-time token returned by prepare_appointment.",
+          },
         },
-        required: ["confirm"],
+        required: ["confirm", "confirmation_token"],
         additionalProperties: false,
       },
     },
@@ -204,18 +209,19 @@ export async function prepareAppointment(
     return failure("a valid email is required");
   }
 
-  const end = new Date(
-    Date.parse(startsAt) + config.appointmentMinutes * 60_000,
-  ).toISOString();
-  await updateWorkflow(sessionId, {
-    stage: "awaiting_confirmation",
-    draft: { startsAt: new Date(startsAt).toISOString(), email, ...(name ? { name } : {}) },
+  const prepared = await prepareConfirmation({
+    sessionId,
+    startsAt,
+    email,
+    ...(name ? { name } : {}),
   });
 
   return JSON.stringify({
     ok: true,
-    starts_at: new Date(startsAt).toISOString(),
-    ends_at: end,
+    starts_at: prepared.startsAt,
+    ends_at: prepared.endsAt,
+    confirmation_token: prepared.token,
+    confirmation_expires_at: prepared.expiresAt,
     requires_confirmation: true,
   });
 }
@@ -223,24 +229,26 @@ export async function prepareAppointment(
 export async function confirmAppointment(
   sessionId: string | undefined,
   argumentsJson: string,
+  source: WorkflowSource,
 ): Promise<string> {
   if (!sessionId) return failure("session is required");
   const args = argsOf(argumentsJson);
   if (args.confirm !== true) return failure("explicit confirmation is required");
-
-  const workflow = await getWorkflow(sessionId);
-  const startsAt = workflow?.draft.startsAt;
-  if (workflow?.stage !== "awaiting_confirmation" || !startsAt) {
-    return failure("no prepared appointment to confirm");
+  const token = stringArg(args, "confirmation_token");
+  if (!token || token.length > 256) {
+    return failure("a valid one-time confirmation token is required");
   }
 
-  const result = await bookAppointment({
-    sessionId,
-    startsAt,
-    email: workflow.draft.email,
-    name: workflow.draft.name,
-  });
-  if (!result.ok) return failure("that slot was just taken; choose another");
+  const result = await confirmReservation({ sessionId, token, source });
+  if (!result.ok) {
+    const reasons: Record<typeof result.reason, string> = {
+      no_preparation: "no prepared appointment to confirm",
+      invalid_token: "the confirmation token is invalid",
+      expired_token: "the confirmation token expired; prepare the slot again",
+      slot_taken: "that slot was just taken; choose another",
+    };
+    return failure(reasons[result.reason]);
+  }
 
   return JSON.stringify({
     ok: true,
@@ -250,10 +258,13 @@ export async function confirmAppointment(
   });
 }
 
-export async function cancelFromTool(argumentsJson: string): Promise<string> {
+export async function cancelFromTool(
+  argumentsJson: string,
+  source: WorkflowSource,
+): Promise<string> {
   const code = stringArg(argsOf(argumentsJson), "confirmation_code");
   if (!code) return failure("confirmation code is required");
-  const cancelled = await cancelAppointment(code);
+  const cancelled = await cancelAppointment(code, undefined, source);
   return JSON.stringify({ ok: cancelled, ...(cancelled ? {} : { reason: "not found" }) });
 }
 
@@ -276,6 +287,7 @@ export async function runWorkflowTool(
   name: string,
   argumentsJson: string,
   sessionId?: string,
+  source: WorkflowSource = "system",
 ): Promise<string | null> {
   switch (name) {
     case "find_appointment_slots":
@@ -283,9 +295,9 @@ export async function runWorkflowTool(
     case "prepare_appointment":
       return prepareAppointment(sessionId, argumentsJson);
     case "confirm_appointment":
-      return confirmAppointment(sessionId, argumentsJson);
+      return confirmAppointment(sessionId, argumentsJson, source);
     case "cancel_appointment":
-      return cancelFromTool(argumentsJson);
+      return cancelFromTool(argumentsJson, source);
     case "handoff_to_human":
       return requestHumanHandoff(sessionId, argumentsJson);
     default:
