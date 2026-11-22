@@ -145,6 +145,11 @@ export const config = {
   workflowStorePath:
     process.env.WORKFLOW_STORE_PATH ?? ".data/voxen-workflow.json",
   appointmentMinutes: toNumber(process.env.APPOINTMENT_MINUTES, 30),
+  confirmationTtlMs: toNumber(
+    process.env.CONFIRMATION_TTL_MS,
+    10 * 60 * 1000,
+  ),
+  shareTtlMs: toNumber(process.env.SHARE_TTL_MS, 24 * 60 * 60 * 1000),
 
   // Optional low-latency WebRTC transport. Off by default: the cascade path
   // remains the production default until a deployment opts in.

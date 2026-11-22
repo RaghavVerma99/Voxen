@@ -221,6 +221,8 @@ Next.js loads `.env.local` for `dev`, `build`, and `start`. On a host, set the s
 | `WORKFLOW_ENABLED` | `true` | Set `false` to remove scheduling tools and the `workflow` SSE event. |
 | `WORKFLOW_STORE_PATH` | `.data/voxen-workflow.json` | Atomic JSON store; `.data/` is gitignored. |
 | `APPOINTMENT_MINUTES` | `30` | Slot length and alignment. |
+| `CONFIRMATION_TTL_MS` | `600000` | How long a prepared appointment may be confirmed. |
+| `SHARE_TTL_MS` | `86400000` | Lifetime of a shareable transcript token. |
 
 Slots are future weekdays from **09:00–17:00 UTC**, aligned to `APPOINTMENT_MINUTES`. The model must call `find_appointment_slots`, then `prepare_appointment`, and only call `confirm_appointment` after an explicit user agreement. `confirm_appointment` requires `confirm: true`; a double-booking returns `slot_taken`. `cancel_appointment` uses the confirmation code, and `handoff_to_human` records a reason. A corrupt store fails closed with `500 CONFIG_ERROR` rather than silently losing bookings.
 

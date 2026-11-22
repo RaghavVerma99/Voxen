@@ -2,6 +2,7 @@
   "name": "voxen",
   "version": "1.1.0",
   "private": true,
+  "type": "module",
   "description": "Voxen — a browser-based AI voice agent with web search and spoken answers.",
   "engines": {
     "node": ">=22"
