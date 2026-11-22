@@ -49,6 +49,31 @@ describe("turn telemetry", () => {
     expect(telemetrySnapshot().timings["stage.tts"].count).toBe(2);
   });
 
+  it("replays browser-measured live turn markers", () => {
+    const trace = startTurnTrace({
+      requestId: "trace-live",
+      transport: "realtime",
+      replay: {
+        totalMs: 740,
+        milestonesMs: { transcript: 140, first_delta: 420, done: 700 },
+        stagesMs: { stt: 140, llm: 280 },
+      },
+    });
+
+    expect(trace.snapshot()).toMatchObject({
+      transport: "realtime",
+      totalMs: 740,
+      milestonesMs: { transcript: 140, first_delta: 420, done: 700 },
+      stagesMs: { stt: 140, llm: 280 },
+    });
+
+    trace.finish();
+    const metrics = telemetrySnapshot();
+    expect(metrics.timings["turn.total"].p50).toBe(740);
+    expect(metrics.timings["stage.stt"].p50).toBe(140);
+    expect(metrics.counters["turn.transport.realtime"]).toBe(1);
+  });
+
   it("freezes the total and records outcome counters on finish", () => {
     const trace = startTurnTrace({ requestId: "trace-3" });
     trace.milestone("complete");

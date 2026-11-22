@@ -4,7 +4,11 @@ import { readJson } from "@/lib/body";
 import { config } from "@/lib/config";
 import { guardRequest, rateLimitHeaders } from "@/lib/guard";
 import { jsonOk, toErrorResponse } from "@/lib/http";
-import { recordRealtimeUsage } from "@/lib/realtime-budget";
+import {
+  recordRealtimeUsage,
+  releaseRealtimeSession,
+  type RealtimeUsage,
+} from "@/lib/realtime-budget";
 import { resolveSessionId } from "@/lib/validate";
 
 interface UsageBody {
@@ -24,10 +28,17 @@ export async function POST(request: NextRequest) {
     const body =
       (await readJson<UsageBody>(request, config.maxChatRequestBytes)) ?? {};
     const sessionId = resolveSessionId(body?.session_id);
-    const usage = recordRealtimeUsage(sessionId, {
-      audioSeconds: body.audio_seconds,
-      outputTokens: body.output_tokens,
-    });
+    let usage: RealtimeUsage;
+    try {
+      usage = recordRealtimeUsage(sessionId, {
+        audioSeconds: body.audio_seconds,
+        outputTokens: body.output_tokens,
+      });
+    } finally {
+      // The browser reports usage once when the session ends. That ends the
+      // reservation too, otherwise three successful sessions exhaust the cap.
+      releaseRealtimeSession(sessionId);
+    }
 
     return jsonOk(
       {

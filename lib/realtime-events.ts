@@ -1,11 +1,21 @@
+export interface RealtimeFunctionCall {
+  callId: string;
+  name: string;
+  argumentsJson: string;
+  itemId?: string;
+}
+
 export interface RealtimeEventUpdate {
   userDelta?: string;
   userTranscript?: string;
   assistantDelta?: string;
+  audioDelta?: boolean;
   speechStarted?: boolean;
   interrupted?: boolean;
   responseDone?: boolean;
+  responseStatus?: string;
   outputTokens?: number;
+  functionCall?: RealtimeFunctionCall;
   error?: string;
 }
 
@@ -75,15 +85,33 @@ export function parseRealtimeEvent(raw: unknown): RealtimeEventUpdate | null {
       return text(event.delta)
         ? { assistantDelta: event.delta as string }
         : null;
+    case "response.output_audio.delta":
+      return { audioDelta: true };
     case "input_audio_buffer.speech_started":
       return { speechStarted: true };
     case "response.interrupted":
       return { interrupted: true };
+    case "response.function_call_arguments.done": {
+      const callId = text(event.call_id);
+      const name = text(event.name);
+      if (!callId || !name || typeof event.arguments !== "string") return null;
+      return {
+        functionCall: {
+          callId,
+          name,
+          argumentsJson: event.arguments,
+          ...(text(event.item_id) ? { itemId: text(event.item_id) } : {}),
+        },
+      };
+    }
     case "response.done": {
       const done = usageTokens(event);
+      const response = isRecord(event.response) ? event.response : undefined;
+      const status = response ? text(response.status) : undefined;
       return {
         responseDone: true,
         ...(done === undefined ? {} : { outputTokens: done }),
+        ...(status ? { responseStatus: status } : {}),
       };
     }
     case "error":

@@ -12,10 +12,19 @@ export const STAGES = ["stt", "llm", "tts"] as const;
 
 export type Milestone = (typeof MILESTONES)[number];
 export type Stage = (typeof STAGES)[number];
+export type TurnTransport = "sse" | "realtime";
+
+/** Browser-measured markers for a live turn, replayed into the shared registry. */
+export interface TurnReplay {
+  totalMs?: number;
+  milestonesMs?: Partial<Record<Milestone, number>>;
+  stagesMs?: Partial<Record<Stage, number>>;
+}
 
 export interface TurnSnapshot {
   requestId: string;
   sessionHash?: string;
+  transport?: TurnTransport;
   status: "ok" | "error";
   errorCode?: string;
   totalMs: number;
@@ -113,17 +122,38 @@ export interface TurnTelemetry {
 export function startTurnTrace(options: {
   requestId: string;
   sessionHash?: string;
+  transport?: TurnTransport;
+  replay?: TurnReplay;
 }): TurnTelemetry {
   const startedAt = performance.now();
   const milestonesMs: Partial<Record<Milestone, number>> = {};
   const stagesMs: Partial<Record<Stage, number>> = {};
+  for (const name of MILESTONES) {
+    const value = options.replay?.milestonesMs?.[name];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      milestonesMs[name] = round(value);
+    }
+  }
+  for (const name of STAGES) {
+    const value = options.replay?.stagesMs?.[name];
+    if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+      stagesMs[name] = round(value);
+      recordTiming(`stage.${name}`, value);
+    }
+  }
+  const replayTotal = options.replay?.totalMs;
+  const replayedTotal =
+    typeof replayTotal === "number" && Number.isFinite(replayTotal) && replayTotal >= 0
+      ? round(replayTotal)
+      : undefined;
   let errorCode: string | undefined;
-  let finalTotal = 0;
+  let finalTotal = replayedTotal ?? 0;
   let finished = false;
 
   const base = (): Omit<TurnSnapshot, "status" | "totalMs"> => ({
     requestId: options.requestId,
     ...(options.sessionHash ? { sessionHash: options.sessionHash } : {}),
+    ...(options.transport ? { transport: options.transport } : {}),
     ...(errorCode ? { errorCode } : {}),
     milestonesMs: { ...milestonesMs },
     stagesMs: { ...stagesMs },
@@ -149,16 +179,23 @@ export function startTurnTrace(options: {
       if (finished) return this.snapshot();
       finished = true;
       errorCode = code;
-      finalTotal = performance.now() - startedAt;
+      finalTotal = replayedTotal ?? performance.now() - startedAt;
       recordTiming("turn.total", finalTotal);
       incrementCounter(code ? `turn.error.${code}` : "turn.ok");
+      if (options.transport) {
+        incrementCounter(`turn.transport.${options.transport}`);
+      }
       return this.snapshot();
     },
     snapshot() {
       return {
         ...base(),
         status: errorCode ? "error" : "ok",
-        totalMs: round(finished ? finalTotal : performance.now() - startedAt),
+        totalMs: round(
+          finished
+            ? finalTotal
+            : (replayedTotal ?? performance.now() - startedAt),
+        ),
       };
     },
   };

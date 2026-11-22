@@ -8,6 +8,7 @@ import { budgetSnapshot } from "@/lib/ratelimit";
 import {
   realtimeUsageSnapshot,
   resetRealtimeBudget,
+  startRealtimeSession,
 } from "@/lib/realtime-budget";
 
 let counter = 0;
@@ -42,6 +43,7 @@ beforeEach(() => {
   config.realtimeMaxSessions = 3;
   config.realtimeMaxAudioSeconds = 180;
   config.realtimeMaxOutputTokens = 4_000;
+  config.workflowEnabled = true;
 });
 
 afterEach(() => {
@@ -88,6 +90,7 @@ describe("realtime token route", () => {
 
     const policy = JSON.parse(String(init.body)) as {
       session: {
+        tools?: Array<{ type: string; name: string; parameters: unknown }>;
         audio: {
           input: {
             transcription: { model: string };
@@ -96,12 +99,45 @@ describe("realtime token route", () => {
         };
       };
     };
+    expect(policy.session.tools?.map((tool) => tool.name)).toEqual([
+      "search_web",
+      "find_appointment_slots",
+      "prepare_appointment",
+      "confirm_appointment",
+      "cancel_appointment",
+      "handoff_to_human",
+    ]);
+    expect(policy.session.tools?.[0]).toMatchObject({ type: "function" });
     expect(policy.session.audio.input.transcription.model).toBe("gpt-transcribe");
     expect(policy.session.audio.input.turn_detection).toMatchObject({
       type: "server_vad",
       interrupt_response: true,
     });
     expect(realtimeUsageSnapshot(id)?.sessions).toBe(1);
+  });
+
+  it("normalizes a provider epoch expiry and honors the workflow flag", async () => {
+    config.workflowEnabled = false;
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({ value: "ek_test", expires_at: 1_800_000_000 }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await postToken(
+      request("/api/realtime/token", { session_id: session() }),
+    );
+    const body = await bodyOf(response);
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const policy = JSON.parse(String(init.body)) as {
+      session: { tools: Array<{ name: string }> };
+    };
+
+    expect(response.status).toBe(200);
+    expect(body.expires_at).toBe(new Date(1_800_000_000 * 1_000).toISOString());
+    expect(policy.session.tools.map((tool) => tool.name)).toEqual(["search_web"]);
   });
 
   it("refunds the reservation when the provider rejects the request", async () => {
@@ -146,8 +182,11 @@ describe("realtime token route", () => {
 });
 
 describe("realtime usage route", () => {
-  it("records audio and token usage within limits", async () => {
+  it("records audio and token usage and releases the session reservation", async () => {
     const id = session();
+    startRealtimeSession(id);
+    expect(realtimeUsageSnapshot(id)?.sessions).toBe(1);
+
     const response = await postUsage(
       request("/api/realtime/usage", {
         session_id: id,
@@ -160,6 +199,7 @@ describe("realtime usage route", () => {
     expect(await bodyOf(response)).toMatchObject({
       usage: { audioSeconds: 42.5, outputTokens: 300 },
     });
+    expect(realtimeUsageSnapshot(id)?.sessions).toBe(0);
   });
 
   it("rejects usage beyond the audio-minute cap", async () => {

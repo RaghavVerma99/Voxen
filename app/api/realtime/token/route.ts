@@ -16,7 +16,11 @@ import {
   releaseRealtimeSession,
   startRealtimeSession,
 } from "@/lib/realtime-budget";
+import { activeToolSchemas } from "@/lib/tools";
 import { resolveSessionId } from "@/lib/validate";
+
+const REALTIME_TOOL_INSTRUCTIONS =
+  "Tools are available for current web information and appointment scheduling. Call find_appointment_slots, then prepare_appointment, and only call confirm_appointment after the user clearly agrees. Read back the confirmation code after a successful booking. Never invent availability, confirmation codes, or tool results. If the user asks for a person or the request is outside scheduling, call handoff_to_human.";
 
 interface TokenBody {
   session_id?: unknown;
@@ -66,7 +70,13 @@ export async function POST(request: NextRequest) {
           session: {
             type: "realtime",
             model: config.realtimeModel,
-            instructions: config.realtimeInstructions,
+            instructions: `${config.realtimeInstructions} ${REALTIME_TOOL_INSTRUCTIONS}`,
+            tools: activeToolSchemas().map((tool) => ({
+              type: "function" as const,
+              name: tool.function.name,
+              description: tool.function.description,
+              parameters: tool.function.parameters,
+            })),
             audio: {
               output: { voice: config.realtimeVoice },
               input: {
@@ -106,13 +116,18 @@ export async function POST(request: NextRequest) {
         502,
       );
     }
+    const expiresAt = data.expires_at;
+    const normalizedExpiry =
+      typeof expiresAt === "string"
+        ? expiresAt
+        : typeof expiresAt === "number" && Number.isFinite(expiresAt)
+          ? new Date(expiresAt * 1_000).toISOString()
+          : undefined;
 
     return jsonOk(
       {
         value: data.value,
-        ...(typeof data.expires_at === "string"
-          ? { expires_at: data.expires_at }
-          : {}),
+        ...(normalizedExpiry ? { expires_at: normalizedExpiry } : {}),
         session_id: sessionId,
         model: config.realtimeModel,
         limits: {
