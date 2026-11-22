@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { redactSessionId } from "./logger";
 import { stateBackend } from "./state";
 
 export const MILESTONES = [
@@ -13,7 +14,7 @@ export const STAGES = ["stt", "llm", "tts"] as const;
 
 export type Milestone = (typeof MILESTONES)[number];
 export type Stage = (typeof STAGES)[number];
-export type TurnTransport = "sse" | "realtime";
+export type TurnTransport = "http" | "sse" | "realtime";
 
 /** Browser-measured markers for a live turn, replayed into the shared registry. */
 export interface TurnReplay {
@@ -129,10 +130,14 @@ export interface TurnTelemetry {
  */
 export function startTurnTrace(options: {
   requestId: string;
+  sessionId?: string;
   sessionHash?: string;
   transport?: TurnTransport;
   replay?: TurnReplay;
 }): TurnTelemetry {
+  const sessionHash =
+    options.sessionHash ??
+    (options.sessionId ? redactSessionId(options.sessionId) : undefined);
   const startedAt = performance.now();
   const milestonesMs: Partial<Record<Milestone, number>> = {};
   const stagesMs: Partial<Record<Stage, number>> = {};
@@ -160,7 +165,7 @@ export function startTurnTrace(options: {
 
   const base = (): Omit<TurnSnapshot, "status" | "totalMs"> => ({
     requestId: options.requestId,
-    ...(options.sessionHash ? { sessionHash: options.sessionHash } : {}),
+    ...(sessionHash ? { sessionHash } : {}),
     ...(options.transport ? { transport: options.transport } : {}),
     ...(errorCode ? { errorCode } : {}),
     milestonesMs: { ...milestonesMs },

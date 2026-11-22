@@ -119,6 +119,14 @@ export const config = {
   tavilyApiKey: process.env.TAVILY_API_KEY ?? "",
   searchTimeoutMs: toNumber(process.env.SEARCH_TIMEOUT_MS, 8_000),
 
+  // Optional eval trace recording. Off by default because answers are user
+  // content; enable it only on an isolated evaluation deployment.
+  evalTraceEnabled: process.env.EVAL_TRACE_ENABLED === "true",
+  evalTracePath: process.env.EVAL_TRACE_PATH ?? ".data/eval-traces.jsonl",
+  evalTraceMaxBytes: toNumber(process.env.EVAL_TRACE_MAX_BYTES, 5 * 1024 * 1024),
+  evalTraceMaxRows: toNumber(process.env.EVAL_TRACE_MAX_ROWS, 2_000),
+  evalTraceMaxAnswerChars: toNumber(process.env.EVAL_TRACE_MAX_ANSWER_CHARS, 4_000),
+
   // Shared state. `memory` is per process; `file` shares one atomic document
   // across instances on the same host or mounted volume. Redis/Postgres can
   // implement the same contract when state must span machines.

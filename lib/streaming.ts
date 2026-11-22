@@ -5,6 +5,7 @@ import {
   buildRequestMessages,
   getHistory,
 } from "./conversation";
+import { recordEvalTrace, type EvalLabels } from "./eval-trace";
 import { errorMessage, logEvent, logWarning } from "./logger";
 import { withSessionLock } from "./session-lock";
 import { SentenceChunker } from "./sse";
@@ -12,6 +13,7 @@ import {
   errorCodeOf,
   incrementCounter,
   type TurnTelemetry,
+  type TurnTransport,
 } from "./telemetry";
 import { getWorkflow, listAppointments } from "./workflow-store";
 
@@ -23,11 +25,19 @@ export interface StreamTurnOptions {
   send: (event: string, data: unknown) => void;
   speak?: boolean;
   trace?: TurnTelemetry;
+  /** Optional labels from the eval recorder; ignored during normal traffic. */
+  eval?: EvalLabels;
+  transport?: TurnTransport;
 }
 
 interface TurnOutcome {
   reply: string;
   audioChain: Promise<void>;
+}
+
+interface TurnObservations {
+  toolCalls: string[];
+  events: string[];
 }
 
 /**
@@ -39,24 +49,64 @@ interface TurnOutcome {
  * so a slow TTS provider cannot delay the client's text or history update.
  */
 export async function streamTurn(options: StreamTurnOptions): Promise<string> {
+  const observed: TurnObservations = { toolCalls: [], events: [] };
+
   try {
     const outcome = await withSessionLock(options.sessionId, () =>
-      runTurn(options),
+      runTurn(options, observed),
     );
     await outcome.audioChain;
     options.trace?.milestone("complete");
 
     const snapshot = options.trace?.finish();
     if (snapshot) logEvent("turn.trace", { ...snapshot });
+    if (observed.events.includes("provider_error")) {
+      observed.events.push("resumed");
+    }
+    recordEvalTrace({
+      ...options.eval,
+      requestId: options.requestId,
+      sessionHash: snapshot?.sessionHash,
+      transport: options.transport ?? "sse",
+      promptChars: options.userContent.length,
+      answer: outcome.reply,
+      toolCalls: observed.toolCalls,
+      events: observed.events,
+      latencyMs: snapshot?.totalMs ?? 0,
+      status: "ok",
+      milestonesMs: snapshot?.milestonesMs,
+      stagesMs: snapshot?.stagesMs,
+    });
     return outcome.reply;
   } catch (err) {
-    const snapshot = options.trace?.finish(errorCodeOf(err));
+    const code = errorCodeOf(err);
+    const snapshot = options.trace?.finish(code);
     if (snapshot) logEvent("turn.trace", { ...snapshot });
+    if (!options.signal.aborted) {
+      recordEvalTrace({
+        ...options.eval,
+        requestId: options.requestId,
+        sessionHash: snapshot?.sessionHash,
+        transport: options.transport ?? "sse",
+        promptChars: options.userContent.length,
+        answer: "",
+        toolCalls: observed.toolCalls,
+        events: observed.events,
+        latencyMs: snapshot?.totalMs ?? 0,
+        status: "error",
+        errorCode: code,
+        milestonesMs: snapshot?.milestonesMs,
+        stagesMs: snapshot?.stagesMs,
+      });
+    }
     throw err;
   }
 }
 
-async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
+async function runTurn(
+  options: StreamTurnOptions,
+  observed: TurnObservations,
+): Promise<TurnOutcome> {
   if (options.signal.aborted) throw abortError();
 
   const chunker = new SentenceChunker();
@@ -83,6 +133,7 @@ async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
         }
       } catch (err) {
         if (options.signal.aborted) return;
+        observed.events.push("provider_error");
         logWarning("stream.tts_unavailable", {
           requestId: options.requestId,
           message: errorMessage(err),
@@ -105,6 +156,7 @@ async function runTurn(options: StreamTurnOptions): Promise<TurnOutcome> {
           options.send("delta", { text: delta });
           for (const chunk of chunker.push(delta)) queueAudio(chunk);
         },
+        onToolCall: (name) => observed.toolCalls.push(name),
       },
       { sessionId: options.sessionId, source: "sse" },
     );

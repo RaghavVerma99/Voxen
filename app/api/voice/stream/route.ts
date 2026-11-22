@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { ensureAiConfigured, transcribeAudio } from "@/lib/ai";
 import { readFormData } from "@/lib/body";
 import { config } from "@/lib/config";
+import { evalLabelsFromHeaders } from "@/lib/eval-trace";
 import { AppError } from "@/lib/errors";
 import {
   consumeBudget,
@@ -111,6 +112,8 @@ export async function POST(request: NextRequest) {
             send,
             speak: formData.get("speak") !== "false",
             trace,
+            eval: evalLabelsFromHeaders(request.headers),
+            transport: "sse",
           });
 
           logEvent("voice.stream.completed", {

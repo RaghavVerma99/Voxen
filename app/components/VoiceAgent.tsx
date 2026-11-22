@@ -463,6 +463,7 @@ export default function VoiceAgent() {
           elapsed_ms: metrics.elapsedMs,
           milestones_ms: metrics.milestonesMs,
           stages_ms: metrics.stagesMs,
+          tool_calls: metrics.toolCalls,
         }),
         cache: "no-store",
       });

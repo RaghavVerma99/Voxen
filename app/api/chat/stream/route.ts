@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { ensureAiConfigured } from "@/lib/ai";
 import { readJson } from "@/lib/body";
 import { config } from "@/lib/config";
+import { evalLabelsFromHeaders } from "@/lib/eval-trace";
 import { AppError } from "@/lib/errors";
 import {
   consumeBudget,
@@ -72,6 +73,8 @@ export async function POST(request: NextRequest) {
             send,
             speak: body?.speak !== false,
             trace,
+            eval: evalLabelsFromHeaders(request.headers),
+            transport: "sse",
           });
 
           logEvent("chat.stream.completed", {

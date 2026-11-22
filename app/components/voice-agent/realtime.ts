@@ -20,6 +20,7 @@ export interface RealtimeTurnMetrics {
   milestonesMs: Partial<Record<Milestone, number>>;
   stagesMs: Partial<Record<Stage, number>>;
   interrupted: boolean;
+  toolCalls?: string[];
 }
 
 export interface RealtimeSessionHandlers {
@@ -68,6 +69,7 @@ export class RealtimeVoiceSession {
   private toolRound = 0;
   private turnStartedAt = 0;
   private turnMilestones: Partial<Record<Milestone, number>> = {};
+  private turnToolCalls: string[] = [];
   private interrupted = false;
 
   constructor(private readonly handlers: RealtimeSessionHandlers) {}
@@ -336,6 +338,7 @@ export class RealtimeVoiceSession {
     }
     if (update.functionCall) {
       this.beginTurn();
+      this.turnToolCalls.push(update.functionCall.name);
       this.pendingCalls.push(update.functionCall);
     }
     if (update.responseDone) {
@@ -407,6 +410,7 @@ export class RealtimeVoiceSession {
     if (this.turnStartedAt > 0) return;
     this.turnStartedAt = performance.now();
     this.turnMilestones = {};
+    this.turnToolCalls = [];
     this.interrupted = false;
     this.toolRound = 0;
   }
@@ -434,9 +438,13 @@ export class RealtimeVoiceSession {
       milestonesMs,
       stagesMs: deriveStages(milestonesMs),
       interrupted: this.interrupted,
+      ...(this.turnToolCalls.length > 0
+        ? { toolCalls: [...this.turnToolCalls] }
+        : {}),
     };
     this.turnStartedAt = 0;
     this.turnMilestones = {};
+    this.turnToolCalls = [];
     this.pendingCalls = [];
     this.toolRound = 0;
     this.interrupted = false;

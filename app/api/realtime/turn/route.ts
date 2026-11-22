@@ -3,6 +3,7 @@ import { NextRequest } from "next/server";
 import { readJson } from "@/lib/body";
 import { config } from "@/lib/config";
 import { addMessage, getHistory } from "@/lib/conversation";
+import { evalLabelsFromHeaders, recordEvalTrace } from "@/lib/eval-trace";
 import { AppError } from "@/lib/errors";
 import { guardRequest, rateLimitHeaders } from "@/lib/guard";
 import { jsonOk, toErrorResponse } from "@/lib/http";
@@ -11,6 +12,7 @@ import { withSessionLock } from "@/lib/session-lock";
 import {
   MILESTONES,
   STAGES,
+  errorCodeOf,
   incrementCounter,
   startTurnTrace,
   type Milestone,
@@ -28,6 +30,7 @@ interface TurnBody {
   elapsed_ms?: unknown;
   milestones_ms?: unknown;
   stages_ms?: unknown;
+  tool_calls?: unknown;
 }
 
 type UnknownRecord = Record<string, unknown>;
@@ -65,6 +68,8 @@ export const dynamic = "force-dynamic";
  */
 export async function POST(request: NextRequest) {
   const requestId = randomUUID();
+  const startedAt = Date.now();
+  const labels = evalLabelsFromHeaders(request.headers);
 
   try {
     const limits = guardRequest(request, "realtime-turn");
@@ -94,6 +99,11 @@ export async function POST(request: NextRequest) {
     }
 
     const interrupted = body.interrupted === true;
+    const toolCalls = Array.isArray(body.tool_calls)
+      ? body.tool_calls
+          .filter((value): value is string => typeof value === "string")
+          .slice(0, 20)
+      : [];
     const replay: TurnReplay = {
       ...(boundedNumber(body.elapsed_ms, config.turnTimeoutMs) !== undefined
         ? { totalMs: boundedNumber(body.elapsed_ms, config.turnTimeoutMs) }
@@ -121,6 +131,20 @@ export async function POST(request: NextRequest) {
       trace.milestone("complete");
       const snapshot = trace.finish();
       logEvent("turn.trace", { ...snapshot });
+      recordEvalTrace({
+        ...labels,
+        requestId,
+        sessionHash: snapshot.sessionHash,
+        transport: "realtime",
+        promptChars: userText.length,
+        answer: assistantText,
+        toolCalls,
+        events: interrupted ? ["interrupted"] : [],
+        latencyMs: snapshot.totalMs,
+        status: "ok",
+        milestonesMs: snapshot.milestonesMs,
+        stagesMs: snapshot.stagesMs,
+      });
 
       const [workflow, appointments] = config.workflowEnabled
         ? await Promise.all([getWorkflow(sessionId), listAppointments(sessionId)])
@@ -136,6 +160,15 @@ export async function POST(request: NextRequest) {
 
     return jsonOk(result, requestId, 200, rateLimitHeaders(limits));
   } catch (err) {
+    recordEvalTrace({
+      ...labels,
+      requestId,
+      transport: "realtime",
+      answer: "",
+      latencyMs: Date.now() - startedAt,
+      status: "error",
+      errorCode: errorCodeOf(err),
+    });
     return toErrorResponse(err, requestId);
   }
 }

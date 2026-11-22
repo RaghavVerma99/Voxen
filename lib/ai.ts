@@ -55,9 +55,15 @@ function isFunctionCall(
   return "function" in call;
 }
 
+/** Optional observability hook used by eval trace recording. */
+export interface LlmObservability {
+  onToolCall?: (name: string) => void;
+}
+
 export async function generateResponse(
   messages: LlmMessage[],
   context: ToolContext = {},
+  observe: LlmObservability = {},
 ): Promise<string> {
   const request: LlmMessage[] = messages.slice();
 
@@ -91,6 +97,7 @@ export async function generateResponse(
     if (functionCalls.length === 0) {
       throw new AppError("LLM_FAILED", "Received a non-function tool call", 502);
     }
+    for (const call of functionCalls) observe.onToolCall?.(call.function.name);
 
     const assistantMessage: LlmMessage = {
       role: "assistant",
@@ -131,7 +138,7 @@ interface PendingToolCall {
   function: { name: string; arguments: string };
 }
 
-export interface StreamHandlers {
+export interface StreamHandlers extends LlmObservability {
   onDelta: (text: string) => void;
   signal?: AbortSignal;
 }
@@ -207,6 +214,7 @@ export async function streamResponse(
       .sort(([left], [right]) => left - right)
       .map(([, call]) => call)
       .filter((call) => call.function.name);
+    for (const call of calls) handlers.onToolCall?.(call.function.name);
 
     if (calls.length === 0) {
       const text = fullText.trim();

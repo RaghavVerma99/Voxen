@@ -225,6 +225,18 @@ Next.js loads `.env.local` for `dev`, `build`, and `start`. On a host, set the s
 
 The `StateBackend` contract in `lib/state/contract.ts` exposes atomic `read`/`write`/`reset` operations over one document. Rate limits, the daily budget, conversation history, Realtime usage, and telemetry all go through it, so switching to `file` makes those caps shared without changing route code. Workflow bookings keep their own atomic file and audit trail; a corrupt state file fails closed rather than resetting caps. Redis/Postgres adapters can implement the same contract when instances run on different machines.
 
+### Live eval tracing
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `EVAL_TRACE_ENABLED` | `false` | Opt in only on an isolated evaluation deployment. |
+| `EVAL_TRACE_PATH` | `.data/eval-traces.jsonl` | Append-only JSONL trace file; use a shared volume if several instances record. |
+| `EVAL_TRACE_MAX_BYTES` | `5242880` | Oldest lines are removed when the file exceeds this size. |
+| `EVAL_TRACE_MAX_ROWS` | `2000` | Maximum retained traces. |
+| `EVAL_TRACE_MAX_ANSWER_CHARS` | `4000` | Answer text cap; no prompt text is stored. |
+
+When enabled, chat, streaming, and Realtime turns append sanitized traces with a request id, hashed session id, timings, tool names, lifecycle events, answer text, and prompt length. Labels are accepted only from `x-eval-case-id`, `x-eval-attempt-id`, and `x-eval-dimension` headers; they never grant access or budget. Raw session ids and user transcript text are never written; the assistant answer is capped because eval scoring needs it.
+
 ### Workflow
 
 | Variable | Default | Notes |
@@ -406,6 +418,7 @@ Unit tests need no API key or network. Coverage includes:
 - Realtime token/usage routes, concurrent session caps, CSP policy, and event parsing
 - Realtime tool execution, deferred turn commits, session reservation release, and browser data-channel behavior
 - shared-state contract for memory/file backends, cross-instance visibility, fail-closed corrupt state, and module integration
+- opt-in live eval traces: header label sanitization, text/session redaction, file bounds, and trace-to-dataset conversion
 
 Playwright mocks the OpenAI/app routes and runs the real browser client. `playwright.config.ts` starts a dev server on port 3100 with a placeholder key, Realtime flagged on, and access codes disabled. The E2E suite covers:
 

@@ -211,6 +211,28 @@ describe("generateResponse", () => {
     }
   });
 
+  it("reports executed tool names to an optional observer", async () => {
+    provider.createChat
+      .mockResolvedValueOnce(toolReply())
+      .mockResolvedValueOnce(textReply("Done."));
+    const onToolCall = vi.fn();
+
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response("<html></html>", { status: 200 })) as typeof fetch;
+
+    try {
+      await generateResponse(
+        [{ role: "user", content: "news?" }],
+        {},
+        { onToolCall },
+      );
+      expect(onToolCall).toHaveBeenCalledWith("search_web");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("fails when the tool loop exceeds its bound", async () => {
     config.maxToolRounds = 1;
     provider.createChat.mockResolvedValue(toolReply());

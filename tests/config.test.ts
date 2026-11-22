@@ -42,6 +42,35 @@ describe("shared state configuration", () => {
   });
 });
 
+describe("eval trace configuration", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("keeps live trace recording disabled by default", async () => {
+    vi.stubEnv("EVAL_TRACE_ENABLED", undefined);
+    vi.stubEnv("EVAL_TRACE_PATH", undefined);
+    vi.resetModules();
+
+    const { config } = await import("@/lib/config");
+
+    expect(config.evalTraceEnabled).toBe(false);
+    expect(config.evalTracePath).toBe(".data/eval-traces.jsonl");
+  });
+
+  it("accepts an explicit isolated recording path", async () => {
+    vi.stubEnv("EVAL_TRACE_ENABLED", "true");
+    vi.stubEnv("EVAL_TRACE_PATH", ".data/live-evals.jsonl");
+    vi.resetModules();
+
+    const { config } = await import("@/lib/config");
+
+    expect(config.evalTraceEnabled).toBe(true);
+    expect(config.evalTracePath).toBe(".data/live-evals.jsonl");
+  });
+});
+
 describe("workflow TTL configuration", () => {
   afterEach(() => {
     vi.unstubAllEnvs();
