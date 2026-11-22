@@ -184,6 +184,13 @@ export const config = {
   realtimeMaxAudioSeconds: toNumber(process.env.REALTIME_MAX_AUDIO_SECONDS, 180),
   realtimeMaxOutputTokens: toNumber(process.env.REALTIME_MAX_OUTPUT_TOKENS, 4_000),
 
+  // Account identities. Disabled by default so existing access-code deployments
+  // keep working; turn on IDENTITY_REQUIRED once accounts are provisioned.
+  identitySecret: process.env.IDENTITY_SECRET ?? "",
+  minIdentitySecretLength: toNumber(process.env.MIN_IDENTITY_SECRET_LENGTH, 16),
+  identityRequired: process.env.IDENTITY_REQUIRED === "true",
+  adminApiKey: process.env.ADMIN_API_KEY ?? "",
+
   // Shared access code. Production refuses paid traffic unless this is a
   // long enough secret, so a misconfigured deploy cannot expose the API.
   accessCode,
@@ -224,3 +231,11 @@ export const isProductionAccessMisconfigured = (): boolean =>
   config.isProduction &&
   config.requireAccessCodeInProduction &&
   !isAccessGateConfigured();
+
+/**
+ * A required identity mode cannot safely hash API keys without a real secret.
+ * Fail closed before any paid route accepts an account token.
+ */
+export const isIdentityMisconfigured = (): boolean =>
+  config.identityRequired &&
+  config.identitySecret.trim().length < config.minIdentitySecretLength;

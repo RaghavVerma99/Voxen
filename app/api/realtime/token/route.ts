@@ -37,9 +37,11 @@ export async function POST(request: NextRequest) {
   let sessionId = "";
   let budgetConsumed = false;
   let sessionReserved = false;
+  let identity: ReturnType<typeof guardRequest>["identity"] = null;
 
   try {
     const limits = guardRequest(request, "realtime-token");
+    identity = limits.identity;
     ensureAiConfigured();
     if (!config.realtimeEnabled) {
       throw new AppError(
@@ -52,7 +54,7 @@ export async function POST(request: NextRequest) {
     const body = await readJson<TokenBody>(request, config.maxChatRequestBytes);
     sessionId = resolveSessionId(body?.session_id);
 
-    consumeBudget("realtime-token");
+    consumeBudget("realtime-token", limits.identity);
     budgetConsumed = true;
     startRealtimeSession(sessionId);
     sessionReserved = true;
@@ -141,7 +143,7 @@ export async function POST(request: NextRequest) {
     );
   } catch (err) {
     if (sessionReserved) releaseRealtimeSession(sessionId);
-    if (budgetConsumed) releaseBudget("realtime-token");
+    if (budgetConsumed) releaseBudget("realtime-token", identity);
     logWarning("realtime.token_failed", {
       requestId,
       message: errorMessage(err),

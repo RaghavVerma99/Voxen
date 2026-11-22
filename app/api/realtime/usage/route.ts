@@ -30,10 +30,14 @@ export async function POST(request: NextRequest) {
     const sessionId = resolveSessionId(body?.session_id);
     let usage: RealtimeUsage;
     try {
-      usage = recordRealtimeUsage(sessionId, {
-        audioSeconds: body.audio_seconds,
-        outputTokens: body.output_tokens,
-      });
+      usage = recordRealtimeUsage(
+        sessionId,
+        {
+          audioSeconds: body.audio_seconds,
+          outputTokens: body.output_tokens,
+        },
+        limits.identity,
+      );
     } finally {
       // The browser reports usage once when the session ends. That ends the
       // reservation too, otherwise three successful sessions exhaust the cap.

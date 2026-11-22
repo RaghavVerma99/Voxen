@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
       requestId,
       sessionHash: redactSessionId(sessionId),
     });
-    consumeBudget("chat-stream");
+    consumeBudget("chat-stream", limits.identity);
 
     return sseResponse(request, {
       requestId,
@@ -85,7 +85,7 @@ export async function POST(request: NextRequest) {
             replyChars: reply.length,
           });
         } catch (err) {
-          if (!signal.aborted) releaseBudget("chat-stream");
+          if (!signal.aborted) releaseBudget("chat-stream", limits.identity);
           throw err;
         }
       },

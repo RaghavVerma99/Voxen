@@ -72,7 +72,7 @@ export async function POST(request: NextRequest) {
     });
     trace.milestone("transcript");
 
-    consumeBudget("chat");
+    consumeBudget("chat", limits.identity);
     let reply: string;
     const endLlm = trace.stage("llm");
     try {
@@ -82,7 +82,7 @@ export async function POST(request: NextRequest) {
         { onToolCall: (name) => toolCalls.push(name) },
       );
     } catch (err) {
-      releaseBudget("chat");
+      releaseBudget("chat", limits.identity);
       throw err;
     } finally {
       endLlm();

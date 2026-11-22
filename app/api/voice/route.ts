@@ -78,16 +78,16 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    consumeBudget("voice");
+    consumeBudget("voice", limits.identity);
     let transcript: string;
     try {
       transcript = (await transcribeAudio(audio, request.signal)).trim();
     } catch (err) {
-      releaseBudget("voice");
+      releaseBudget("voice", limits.identity);
       throw err;
     }
     if (!transcript) {
-      releaseBudget("voice");
+      releaseBudget("voice", limits.identity);
       throw new AppError("NOTHING_HEARD", "No speech detected in audio", 400);
     }
 
@@ -98,7 +98,7 @@ export async function POST(request: NextRequest) {
         { sessionId },
       );
     } catch (err) {
-      releaseBudget("voice");
+      releaseBudget("voice", limits.identity);
       throw err;
     }
     appendTurn(sessionId, transcript, reply);

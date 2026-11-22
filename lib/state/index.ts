@@ -4,15 +4,20 @@ import { createFileStateBackend } from "./file";
 import { createMemoryStateBackend } from "./memory";
 
 export type {
+  AccountPlan,
+  AccountRole,
+  AccountStatus,
   StateBackend,
   StateBackendName,
   StateDocument,
   StateSection,
+  StoredAccount,
   StoredBudget,
   StoredMessage,
   StoredRateBucket,
   StoredRealtimeUsage,
   StoredSession,
+  StoredUsage,
 } from "./contract";
 export { createFileStateBackend } from "./file";
 export { createMemoryStateBackend } from "./memory";

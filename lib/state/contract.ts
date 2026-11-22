@@ -28,6 +28,31 @@ export interface StoredRealtimeUsage {
   updatedAt: string;
 }
 
+export type AccountPlan = "free" | "pro" | "enterprise";
+export type AccountRole = "user" | "admin";
+export type AccountStatus = "active" | "disabled";
+
+export interface StoredAccount {
+  id: string;
+  name: string;
+  email: string;
+  keyHash: string;
+  plan: AccountPlan;
+  role: AccountRole;
+  status: AccountStatus;
+  createdAt: string;
+}
+
+export interface StoredUsage {
+  accountId: string;
+  date: string;
+  requests: number;
+  audioSeconds: number;
+  outputTokens: number;
+  costMicros: number;
+  updatedAt: string;
+}
+
 /**
  * The full shared-state document. Everything that must hold across instances
  * lives here; workflow bookings keep their own durable file because they have
@@ -40,6 +65,8 @@ export interface StateDocument {
   sessions: Record<string, StoredSession>;
   sessionAccessCount: number;
   realtime: Record<string, StoredRealtimeUsage>;
+  accounts: Record<string, StoredAccount>;
+  usage: Record<string, StoredUsage>;
   counters: Record<string, number>;
   samples: Record<string, number[]>;
 }
@@ -69,6 +96,8 @@ export function emptyState(): StateDocument {
     sessions: dictionary<StoredSession>(),
     sessionAccessCount: 0,
     realtime: dictionary<StoredRealtimeUsage>(),
+    accounts: dictionary<StoredAccount>(),
+    usage: dictionary<StoredUsage>(),
     counters: dictionary<number>(),
     samples: dictionary<number[]>(),
   };
@@ -151,6 +180,63 @@ export function normalizeState(raw: unknown): StateDocument {
         sessions: Math.max(0, finite(record.sessions)),
         audioSeconds: Math.max(0, finite(record.audioSeconds)),
         outputTokens: Math.max(0, finite(record.outputTokens)),
+        updatedAt:
+          typeof record.updatedAt === "string"
+            ? record.updatedAt
+            : new Date(0).toISOString(),
+      };
+    }
+  }
+
+  const accounts = source.accounts;
+  if (typeof accounts === "object" && accounts !== null && !Array.isArray(accounts)) {
+    for (const [key, value] of Object.entries(accounts)) {
+      const record = value as Record<string, unknown> | null;
+      if (!record || typeof record !== "object") continue;
+      const plan = record.plan;
+      const role = record.role;
+      const status = record.status;
+      if (
+        typeof record.id !== "string" ||
+        typeof record.name !== "string" ||
+        typeof record.keyHash !== "string" ||
+        (plan !== "free" && plan !== "pro" && plan !== "enterprise") ||
+        (role !== "user" && role !== "admin") ||
+        (status !== "active" && status !== "disabled")
+      ) {
+        continue;
+      }
+      state.accounts[key] = {
+        id: record.id,
+        name: record.name,
+        email: typeof record.email === "string" ? record.email : "",
+        keyHash: record.keyHash,
+        plan,
+        role,
+        status,
+        createdAt:
+          typeof record.createdAt === "string"
+            ? record.createdAt
+            : new Date(0).toISOString(),
+      };
+    }
+  }
+
+  const usage = source.usage;
+  if (typeof usage === "object" && usage !== null && !Array.isArray(usage)) {
+    for (const [key, value] of Object.entries(usage)) {
+      const record = value as Record<string, unknown> | null;
+      if (!record || typeof record !== "object") continue;
+      if (typeof record.accountId !== "string" || typeof record.date !== "string") {
+        continue;
+      }
+      state.usage[key] = {
+        accountId: record.accountId,
+        date: record.date,
+        requests: Math.max(0, Math.floor(finite(record.requests))),
+        audioSeconds: Math.max(0, finite(record.audioSeconds)),
+        outputTokens: Math.max(0, Math.floor(finite(record.outputTokens))),
+        costMicros: Math.max(0, Math.floor(finite(record.costMicros))),
         updatedAt:
           typeof record.updatedAt === "string"
             ? record.updatedAt

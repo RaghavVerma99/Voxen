@@ -1,5 +1,7 @@
+import { recordRealtimeMetering } from "./billing";
 import { config } from "./config";
 import { AppError } from "./errors";
+import type { IdentityContext } from "./identity";
 import { stateBackend, type StateDocument, type StoredRealtimeUsage } from "./state";
 
 export interface RealtimeUsage extends StoredRealtimeUsage {}
@@ -72,6 +74,7 @@ function validNumber(value: unknown): value is number {
 export function recordRealtimeUsage(
   sessionId: string,
   input: { audioSeconds?: unknown; outputTokens?: unknown },
+  identity?: IdentityContext | null,
 ): RealtimeUsage {
   const audioSeconds = input.audioSeconds ?? 0;
   const outputTokens = input.outputTokens ?? 0;
@@ -83,7 +86,7 @@ export function recordRealtimeUsage(
     );
   }
 
-  return stateBackend().write((document) => {
+  const usage = stateBackend().write((document) => {
     const record = get(document, sessionId);
     const nextAudio = record.audioSeconds + audioSeconds;
     const nextTokens = record.outputTokens + outputTokens;
@@ -103,6 +106,14 @@ export function recordRealtimeUsage(
     record.updatedAt = new Date().toISOString();
     return { ...record };
   });
+
+  if (identity) {
+    recordRealtimeMetering(identity, {
+      audioSeconds: typeof audioSeconds === "number" ? audioSeconds : 0,
+      outputTokens: typeof outputTokens === "number" ? outputTokens : 0,
+    });
+  }
+  return usage;
 }
 
 export function realtimeUsageSnapshot(sessionId: string): RealtimeUsage | null {

@@ -1,12 +1,15 @@
 import { timingSafeEqual } from "node:crypto";
 import type { NextRequest } from "next/server";
+import {
+  consumeRequestBudget,
+  releaseRequestBudget,
+} from "./billing";
 import { config, isProductionAccessMisconfigured } from "./config";
 import { AppError } from "./errors";
+import { identityFromRequest, type IdentityContext } from "./identity";
 import { logEvent } from "./logger";
 import {
-  consumeDailyBudget,
   rateLimit,
-  refundDailyBudget,
   type RateLimitResult,
 } from "./ratelimit";
 
@@ -62,20 +65,38 @@ export function rateLimitHeaders(
   };
 }
 
+export interface GuardResult extends RateLimitResult {
+  identity: IdentityContext | null;
+}
+
 /**
- * Applies per-client rate limiting and access control. Rate limiting runs
- * first so denied access-code attempts are still counted and cannot be
- * brute-forced without a bound. In production, a missing or too-short access
- * code fails closed before any paid work can start.
+ * Applies per-identity/per-client rate limiting and access control. Rate
+ * limiting runs first so denied access-code attempts are still counted and
+ * cannot be brute-forced without a bound. In production, a missing or too-short
+ * access code fails closed before any paid work can start.
  */
 export function guardRequest(
   request: NextRequest,
   route: string,
-): RateLimitResult {
-  const result = rateLimit(`${clientAddress(request)}:${route}`);
+): GuardResult {
+  let identity: IdentityContext | null = null;
+  let identityError: unknown;
+  try {
+    identity = identityFromRequest(request);
+  } catch (err) {
+    // Count invalid-key attempts first, then surface the auth error after the
+    // rate-limit decision so they cannot bypass the shared bucket.
+    identityError = err;
+  }
+
+  const subject = identity ? `account:${identity.accountId}` : clientAddress(request);
+  const result = rateLimit(`${subject}:${route}`);
+  const guarded: GuardResult = { ...result, identity };
+
   if (!result.allowed) {
     logEvent("request.rate_limited", {
       route,
+      subject: identity ? "account" : "client",
       retryAfterSeconds: result.retryAfterSeconds,
     });
     throw new AppError(
@@ -85,6 +106,8 @@ export function guardRequest(
       rateLimitHeaders(result, true),
     );
   }
+
+  if (identityError) throw identityError;
 
   if (isProductionAccessMisconfigured()) {
     logEvent("request.access_misconfigured", { route });
@@ -105,27 +128,35 @@ export function guardRequest(
     throw err;
   }
 
-  return result;
+  return guarded;
 }
 
 /**
- * Counts one paid AI request against the daily budget. Call this after the
- * request has been validated, so malformed input does not burn budget.
+ * Counts one paid AI request against the global budget and the caller's plan.
+ * Call this after the request has been validated, so malformed input does not
+ * burn budget.
  */
-export function consumeBudget(route: string): void {
-  if (!consumeDailyBudget()) {
-    logEvent("request.budget_exhausted", { route });
-    throw new AppError(
-      "BUDGET_EXHAUSTED",
-      "The daily request budget has been reached. Please try again tomorrow.",
-      429,
-    );
+export function consumeBudget(
+  route: string,
+  identity?: IdentityContext | null,
+): void {
+  try {
+    consumeRequestBudget(route, identity ?? undefined);
+  } catch (err) {
+    if (err instanceof AppError && err.code === "QUOTA_EXHAUSTED") {
+      logEvent("request.quota_exhausted", { route });
+    } else {
+      logEvent("request.budget_exhausted", { route });
+    }
+    throw err;
   }
 }
 
 /** Releases a reservation made by consumeBudget when the turn fails. */
-export function releaseBudget(route: string): void {
-  if (refundDailyBudget()) {
-    logEvent("request.budget_released", { route });
-  }
+export function releaseBudget(
+  route: string,
+  identity?: IdentityContext | null,
+): void {
+  if (releaseRequestBudget(route, identity ?? undefined)) return;
+  logEvent("request.budget_released", { route });
 }
