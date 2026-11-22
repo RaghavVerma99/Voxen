@@ -8,7 +8,7 @@ import {
 } from "node:fs";
 import { dirname } from "node:path";
 
-import { config } from "./config";
+import { config } from "./config.ts";
 import type { EvalAttempt, EvalDimension } from "./evals";
 import type { Milestone, Stage, TurnTransport } from "./telemetry";
 

@@ -18,6 +18,9 @@
     "typecheck": "tsc --noEmit",
     "check": "npm run typecheck && npm test",
     "eval": "node --experimental-strip-types scripts/evals.mts",
+    "eval:gate": "node --experimental-strip-types scripts/evals.mts --gate",
+    "eval:live": "node --experimental-strip-types scripts/evals.mts --traces .data/eval-traces.jsonl",
+    "eval:baseline": "node --experimental-strip-types scripts/evals.mts --write-baseline evals/baseline.json",
     "audit": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {

@@ -28,6 +28,9 @@ jobs:
       - name: Test
         run: npm test
 
+      - name: Eval regression gate
+        run: npm run eval:gate
+
       - name: Build
         run: npm run build
         env:

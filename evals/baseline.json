@@ -1,0 +1,18 @@
+{
+  "passAt1": 0.5499999999999999,
+  "passAt5": 1,
+  "byDimension": {
+    "timing": {
+      "passAt1": 0.6,
+      "passAt5": 1
+    },
+    "recovery": {
+      "passAt1": 0.6,
+      "passAt5": 1
+    },
+    "grounded": {
+      "passAt1": 0.5,
+      "passAt5": 1
+    }
+  }
+}

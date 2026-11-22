@@ -1,0 +1,9 @@
+{
+  "minPassAt1": 0.55,
+  "minPassAt5": 1,
+  "byDimension": {
+    "timing": { "minPassAt1": 0.6, "minPassAt5": 1 },
+    "recovery": { "minPassAt1": 0.6, "minPassAt5": 1 },
+    "grounded": { "minPassAt1": 0.5, "minPassAt5": 1 }
+  }
+}

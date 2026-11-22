@@ -1,6 +1,6 @@
 # Voxen
 
-Voxen is a browser-based **AI voice agent** in one deployable Next.js app. Speak or type, watch the reply stream in, and hear it spoken sentence by sentence. It includes web search, bounded session memory, a narrow persisted appointment workflow, turn telemetry, offline evals, and an opt-in full-duplex Realtime/WebRTC transport.
+Voxen is a browser-based **AI voice agent** in one deployable Next.js app. Speak or type, watch the reply stream in, and hear it spoken sentence by sentence. It includes web search, bounded session memory, a narrow persisted appointment workflow, turn telemetry, offline and live-trace evals with CI regression gates, and an opt-in full-duplex Realtime/WebRTC transport.
 
 > **Status:** v1.1.0. The default SSE cascade is production-ready for a single instance; the Realtime/WebRTC path is flag-gated and intentionally off by default.
 
@@ -12,7 +12,7 @@ Voxen is a browser-based **AI voice agent** in one deployable Next.js app. Speak
 - **Streaming-first.** Text commits before audio drains, so a failed narrator never loses the answer.
 - **Durable narrow workflow.** Appointment scheduling with explicit confirmation, conflict detection, cancellation, human handoff, deterministic post-call summary, and tokenized shareable transcripts.
 - **TTS failover.** Realtime narrator first, legacy Speech API second; the chain is reported by `/api/ready`.
-- **Operational visibility.** Per-turn traces, stage percentiles, guarded `/api/metrics`, and a deterministic offline eval harness.
+- **Operational visibility.** Per-turn traces, stage percentiles, guarded `/api/metrics`, and deterministic offline/live eval harnesses with regression gates.
 - **Fail-closed controls.** Production access gate, rate limits, daily budget, byte caps, session serialization, CSP nonce, and hashed session ids.
 
 ---
@@ -396,13 +396,16 @@ An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTT
 ## Testing and evals
 
 ```bash
-npm run check          # typecheck + 150 unit tests
+npm run check          # typecheck + 164 unit tests
 npm test               # Vitest, no network or API key
 npm run test:e2e       # Playwright browser E2E (7 scenarios)
 npm run test:e2e:install # installs the Chromium binary once
 npm run audit          # production dependency audit
 npm run build          # Next.js standalone build
 npm run eval           # deterministic offline eval dataset
+npm run eval:gate      # thresholds + committed-baseline regression check
+npm run eval:live      # score labeled live traces instead of the offline dataset
+npm run eval:baseline  # regenerate evals/baseline.json after an intentional change
 ```
 
 Unit tests need no API key or network. Coverage includes:
@@ -412,7 +415,7 @@ Unit tests need no API key or network. Coverage includes:
 - TTS provider chain and mocked failover
 - health/ready reporting, access gate fail-closed behavior, and budget refunds
 - telemetry traces, percentiles, and guarded metrics
-- eval scoring, pass@1/pass@5, and dataset parsing
+- eval scoring, pass@1/pass@5, dataset parsing, and deterministic CI gates
 - durable appointment store: atomic writes, conflicts, cancellation, corrupt-store fail-closed
 - scheduling tools, session-scoped workflow state, one-time confirmations, summaries, share expiry, and revocation
 - Realtime token/usage routes, concurrent session caps, CSP policy, and event parsing
@@ -432,7 +435,11 @@ Playwright mocks the OpenAI/app routes and runs the real browser client. `playwr
 
 `npm run eval` reads `evals/dataset.json` and scores recorded attempts across `timing`, `recovery`, and `grounded` dimensions. It is deterministic and offline; the bundled dataset currently reports **pass@1=55%, pass@5=100%**. Add your own cases by appending `{ testCase, attempts }` entries.
 
-CI runs `npm ci`, `npm run audit`, `npm run typecheck`, `npm test`, `npm run build`, and the Playwright suite with a placeholder key. On Windows, use `npm.cmd` in PowerShell.
+`npm run eval:gate` adds explicit floors from `evals/thresholds.json` and compares against `evals/baseline.json`, so a score drop fails the build even when it stays above the floor. Both files are checked in; regenerate the baseline only after an intentional quality change. The gate needs no API key or network, and CI runs it on every push and pull request.
+
+`npm run eval:live` reads `.data/eval-traces.jsonl`, keeps the original case thresholds, and replaces attempts with labeled live traffic. Record on an isolated deployment with `EVAL_TRACE_ENABLED=true`, then send `x-eval-case-id`, `x-eval-attempt-id`, and `x-eval-dimension` headers from the eval client. Only successful, labeled traces are scored.
+
+CI runs `npm ci`, `npm run audit`, `npm run typecheck`, `npm test`, `npm run eval:gate`, `npm run build`, and the Playwright suite with a placeholder key. On Windows, use `npm.cmd` in PowerShell.
 
 ---
 
@@ -504,16 +511,19 @@ app/
   globals.css / layout.tsx / page.tsx / error.tsx / not-found.tsx
 lib/
   ai.ts openai-client.ts tts.ts realtime-tts.ts streaming.ts
-  telemetry.ts evals.ts workflow-store.ts workflow-tools.ts workflow-summary.ts
+  telemetry.ts evals.ts eval-gate.ts eval-trace.ts
+  workflow-store.ts workflow-tools.ts workflow-summary.ts
   realtime-budget.ts realtime-events.ts csp.ts config.ts
   guard.ts ratelimit.ts conversation.ts session-lock.ts
   state/contract.ts state/memory.ts state/file.ts state/index.ts
   tools.ts body.ts validate.ts errors.ts http.ts logger.ts sse.ts sse-response.ts
 proxy.ts                          CSP nonce + document policy
 evals/dataset.json                offline eval cases
-scripts/evals.mts                 eval runner
+evals/thresholds.json             explicit CI floors
+evals/baseline.json               committed regression baseline
+scripts/evals.mts                 eval runner with gate and live-trace modes
 scripts/start.mjs                 standalone launcher
-tests/                            17 test files, 150 unit tests
+tests/                            19 test files, 164 unit tests
 e2e/                              Playwright browser scenarios
 playwright.config.ts              E2E web server + browser config
 Dockerfile next.config.mjs vitest.config.mts
@@ -534,9 +544,9 @@ Dockerfile next.config.mjs vitest.config.mts
 ## Roadmap
 
 1. **Remote shared state** — Redis/Postgres implementations of `StateBackend` and a shared workflow store for multi-machine fleets.
-2. **Stronger evals** — live provider replay, regression gates in CI, and scenario-level scoring.
-3. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
-4. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
-5. **Realtime hardening** — richer browser/device matrix and measured latency targets.
+2. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
+3. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
+4. **Realtime hardening** — richer browser/device matrix and measured latency targets.
+5. **Eval breadth** — more labeled live scenarios and provider-specific baselines.
 
 > First make it work. Then make it fast. Then make it reliable. Then make it scalable.
