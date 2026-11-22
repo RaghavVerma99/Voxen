@@ -32,3 +32,11 @@ jobs:
         run: npm run build
         env:
           OPENAI_API_KEY: sk-build-placeholder
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Browser E2E
+        run: npm run test:e2e
+        env:
+          OPENAI_API_KEY: sk-build-placeholder

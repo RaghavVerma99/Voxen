@@ -13,6 +13,8 @@ out/
 
 # tests
 coverage/
+playwright-report/
+test-results/
 
 # local persisted workflow state
 .data/

@@ -373,14 +373,16 @@ An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTT
 ## Testing and evals
 
 ```bash
-npm run check     # typecheck + 141 tests
-npm test          # Vitest, no network or API key
-npm run audit     # production dependency audit
-npm run build     # Next.js standalone build
-npm run eval      # deterministic offline eval dataset
+npm run check          # typecheck + 141 unit tests
+npm test               # Vitest, no network or API key
+npm run test:e2e       # Playwright browser E2E (7 scenarios)
+npm run test:e2e:install # installs the Chromium binary once
+npm run audit          # production dependency audit
+npm run build          # Next.js standalone build
+npm run eval           # deterministic offline eval dataset
 ```
 
-Tests need no API key or network. Coverage includes:
+Unit tests need no API key or network. Coverage includes:
 
 - blocking and streaming route contracts
 - SSE order, `done` before audio, heartbeats, and turn deadlines
@@ -393,9 +395,19 @@ Tests need no API key or network. Coverage includes:
 - Realtime token/usage routes, concurrent session caps, CSP policy, and event parsing
 - Realtime tool execution, deferred turn commits, session reservation release, and browser data-channel behavior
 
+Playwright mocks the OpenAI/app routes and runs the real browser client. `playwright.config.ts` starts a dev server on port 3100 with a placeholder key, Realtime flagged on, and access codes disabled. The E2E suite covers:
+
+- streamed text turns and server session adoption
+- autoplay blocking and manual replay recovery
+- skipped speech chunks after a failed narrator (the client-side failover path)
+- the access gate and stored access code
+- summary share links with expiry plus owner-only revocation
+- live function calls and final-only Realtime turn commits
+- barge-in telemetry from a live turn
+
 `npm run eval` reads `evals/dataset.json` and scores recorded attempts across `timing`, `recovery`, and `grounded` dimensions. It is deterministic and offline; the bundled dataset currently reports **pass@1=55%, pass@5=100%**. Add your own cases by appending `{ testCase, attempts }` entries.
 
-CI runs `npm ci`, `npm run audit`, `npm run typecheck`, `npm test`, and `npm run build` with a placeholder key. On Windows, use `npm.cmd` in PowerShell.
+CI runs `npm ci`, `npm run audit`, `npm run typecheck`, `npm test`, `npm run build`, and the Playwright suite with a placeholder key. On Windows, use `npm.cmd` in PowerShell.
 
 ---
 
@@ -448,8 +460,11 @@ app/
     metrics/route.ts              guarded telemetry snapshot
     workflow/route.ts             persisted workflow state
     workflow/summary/route.ts     post-call summary + share
-    transcript/[token]/route.ts   read-only shared transcript
+    workflow/share/revoke/route.ts owner-only share revocation
+    transcript/[token]/route.ts   expiring shared transcript
     realtime/token/route.ts       ephemeral client secret
+    realtime/tool/route.ts        guarded live tool execution
+    realtime/turn/route.ts        guarded final-turn commit
     realtime/usage/route.ts       final Realtime usage
   components/
     VoiceAgent.tsx                client state machine
@@ -472,7 +487,9 @@ proxy.ts                          CSP nonce + document policy
 evals/dataset.json                offline eval cases
 scripts/evals.mts                 eval runner
 scripts/start.mjs                 standalone launcher
-tests/                            13 test files, 121 tests
+tests/                            16 test files, 141 unit tests
+e2e/                              Playwright browser scenarios
+playwright.config.ts              E2E web server + browser config
 Dockerfile next.config.mjs vitest.config.mts
 .github/workflows/ci.yml
 ```
@@ -490,11 +507,10 @@ Dockerfile next.config.mjs vitest.config.mts
 
 ## Roadmap
 
-1. **Browser E2E** — Playwright coverage for SSE, autoplay recovery, TTS failover, access gate, live tools, barge-in, and sharing.
-2. **Shared infrastructure** — Redis/Postgres for sessions, rate limits, budgets, and bookings so caps hold across instances.
-3. **Stronger evals** — live provider replay, regression gates in CI, and scenario-level scoring.
-4. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
-5. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
-6. **Realtime hardening** — richer browser/device matrix and measured latency targets.
+1. **Shared infrastructure** — Redis/Postgres for sessions, rate limits, budgets, and bookings so caps hold across instances.
+2. **Stronger evals** — live provider replay, regression gates in CI, and scenario-level scoring.
+3. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
+4. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
+5. **Realtime hardening** — richer browser/device matrix and measured latency targets.
 
 > First make it work. Then make it fast. Then make it reliable. Then make it scalable.

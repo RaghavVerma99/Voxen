@@ -333,18 +333,21 @@ export default function VoiceAgent() {
     if (node) node.scrollTop = node.scrollHeight;
   }, [entries, status]);
 
+  // `audio` is a fresh facade object on every render, so depending on it would
+  // tear down an in-flight stream whenever playback state changed.
+  const stopAudio = audio.stop;
   useEffect(() => {
     return () => {
       streamAbortRef.current?.abort();
       if (flushFrameRef.current !== null) {
         window.cancelAnimationFrame(flushFrameRef.current);
       }
-      audio.stop();
+      stopAudio();
       const live = liveRef.current;
       liveRef.current = null;
       void live?.stop();
     };
-  }, [audio]);
+  }, [stopAudio]);
 
   useEffect(() => {
     if (!sessionId || booting) return;
