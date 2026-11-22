@@ -1,10 +1,26 @@
 "use client";
 
 import { parseRealtimeEvent } from "../../../lib/realtime-events";
+import type { Milestone, Stage } from "../../../lib/telemetry";
 import { ApiError, errorFromResponse } from "./stream";
 
 const OPENAI_REALTIME_CALLS = "https://api.openai.com/v1/realtime/calls";
 const SIGNAL_TIMEOUT_MS = 15_000;
+const MAX_TOOL_ROUNDS = 4;
+
+export interface RealtimeFunctionCallPayload {
+  callId: string;
+  name: string;
+  argumentsJson: string;
+  itemId?: string;
+}
+
+export interface RealtimeTurnMetrics {
+  elapsedMs: number;
+  milestonesMs: Partial<Record<Milestone, number>>;
+  stagesMs: Partial<Record<Stage, number>>;
+  interrupted: boolean;
+}
 
 export interface RealtimeSessionHandlers {
   onUserDelta?: (text: string) => void;
@@ -12,7 +28,10 @@ export interface RealtimeSessionHandlers {
   onAssistantDelta?: (text: string) => void;
   onSpeechStarted?: () => void;
   onInterrupted?: () => void;
-  onResponseDone?: () => void;
+  /** Called only for the final response, after any tool continuations finish. */
+  onResponseDone?: (metrics: RealtimeTurnMetrics) => void;
+  /** Executes a provider function call on the server and returns its output. */
+  onToolCall?: (call: RealtimeFunctionCallPayload) => Promise<string>;
   onError?: (message: string) => void;
   onClosed?: () => void;
   onAudioBlocked?: () => void;
@@ -42,6 +61,14 @@ export class RealtimeVoiceSession {
   private stopped = false;
   private sessionId = "";
   private accessCode = "";
+  private tokenMinted = false;
+  private closedNotified = false;
+
+  private pendingCalls: RealtimeFunctionCallPayload[] = [];
+  private toolRound = 0;
+  private turnStartedAt = 0;
+  private turnMilestones: Partial<Record<Milestone, number>> = {};
+  private interrupted = false;
 
   constructor(private readonly handlers: RealtimeSessionHandlers) {}
 
@@ -56,8 +83,81 @@ export class RealtimeVoiceSession {
     this.sessionId = sessionId;
     this.accessCode = accessCode;
     this.stopped = false;
+    this.closedNotified = false;
 
     const token = await this.mintToken();
+    this.tokenMinted = true;
+
+    try {
+      await this.openSession(token);
+      // The reservation is now owned by the normal /usage report on stop().
+      this.tokenMinted = false;
+    } catch (err) {
+      await this.releaseReservation();
+      this.tokenMinted = false;
+      this.cleanup();
+      throw err;
+    }
+  }
+
+  sendText(text: string): void {
+    this.beginTurn();
+    const channel = this.openChannel();
+    channel.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text }],
+        },
+      }),
+    );
+    channel.send(JSON.stringify({ type: "response.create" }));
+  }
+
+  /** Manual barge-in; server VAD also interrupts automatically. */
+  interrupt(): void {
+    const channel = this.channel;
+    if (!channel || channel.readyState !== "open") return;
+    this.interrupted = true;
+    channel.send(JSON.stringify({ type: "response.cancel" }));
+    channel.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
+    this.handlers.onInterrupted?.();
+  }
+
+  setMuted(muted: boolean): void {
+    for (const track of this.microphone?.getAudioTracks() ?? []) {
+      track.enabled = !muted;
+    }
+  }
+
+  /** Sends one tool result and asks the provider to continue the response. */
+  sendToolOutput(callId: string, output: string): void {
+    const channel = this.openChannel();
+    this.sendFunctionOutput(channel, callId, output);
+    channel.send(JSON.stringify({ type: "response.create" }));
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopped) return;
+    this.stopped = true;
+
+    const channel = this.channel;
+    if (channel?.readyState === "open") {
+      channel.send(JSON.stringify({ type: "response.cancel" }));
+      channel.close();
+    }
+    this.cleanup();
+
+    if (this.startedAt > 0) {
+      const audioSeconds =
+        Math.round(((Date.now() - this.startedAt) / 1_000) * 10) / 10;
+      await this.reportUsage(audioSeconds);
+    }
+  }
+
+  private async openSession(token: string): Promise<void> {
     const peer = new RTCPeerConnection();
     this.peer = peer;
 
@@ -72,7 +172,10 @@ export class RealtimeVoiceSession {
       void element.play().catch(() => this.handlers.onAudioBlocked?.());
     });
     peer.addEventListener("connectionstatechange", () => {
-      if (peer.connectionState === "failed" && !this.stopped) void this.stop();
+      if (peer.connectionState === "failed" && !this.stopped) {
+        void this.stop();
+        this.notifyClosed();
+      }
     });
 
     this.microphone = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -128,54 +231,6 @@ export class RealtimeVoiceSession {
     this.startedAt = Date.now();
   }
 
-  sendText(text: string): void {
-    const channel = this.openChannel();
-    channel.send(
-      JSON.stringify({
-        type: "conversation.item.create",
-        item: {
-          type: "message",
-          role: "user",
-          content: [{ type: "input_text", text }],
-        },
-      }),
-    );
-    channel.send(JSON.stringify({ type: "response.create" }));
-  }
-
-  /** Manual barge-in; server VAD also interrupts automatically. */
-  interrupt(): void {
-    const channel = this.channel;
-    if (!channel || channel.readyState !== "open") return;
-    channel.send(JSON.stringify({ type: "response.cancel" }));
-    channel.send(JSON.stringify({ type: "input_audio_buffer.clear" }));
-    this.handlers.onInterrupted?.();
-  }
-
-  setMuted(muted: boolean): void {
-    for (const track of this.microphone?.getAudioTracks() ?? []) {
-      track.enabled = !muted;
-    }
-  }
-
-  async stop(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
-
-    const channel = this.channel;
-    if (channel?.readyState === "open") {
-      channel.send(JSON.stringify({ type: "response.cancel" }));
-      channel.close();
-    }
-    this.cleanup();
-
-    if (this.startedAt > 0) {
-      const audioSeconds =
-        Math.round(((Date.now() - this.startedAt) / 1_000) * 10) / 10;
-      await this.reportUsage(audioSeconds);
-    }
-  }
-
   private async mintToken(): Promise<string> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
@@ -203,6 +258,15 @@ export class RealtimeVoiceSession {
   }
 
   private async reportUsage(audioSeconds: number): Promise<void> {
+    await this.postUsage(audioSeconds);
+  }
+
+  /** Releases a token reservation when setup fails before the session starts. */
+  private async releaseReservation(): Promise<void> {
+    await this.postUsage(0);
+  }
+
+  private async postUsage(audioSeconds: number): Promise<void> {
     const headers: Record<string, string> = {
       "content-type": "application/json",
     };
@@ -248,14 +312,141 @@ export class RealtimeVoiceSession {
 
     const update = parseRealtimeEvent(parsed);
     if (!update) return;
+    if (update.userDelta || update.speechStarted) this.beginTurn();
     if (update.userDelta) this.handlers.onUserDelta?.(update.userDelta);
-    if (update.userTranscript) this.handlers.onUserTranscript?.(update.userTranscript);
-    if (update.assistantDelta) this.handlers.onAssistantDelta?.(update.assistantDelta);
+    if (update.userTranscript) {
+      this.beginTurn();
+      this.mark("transcript");
+      this.handlers.onUserTranscript?.(update.userTranscript);
+    }
+    if (update.assistantDelta) {
+      this.beginTurn();
+      this.mark("first_delta");
+      this.handlers.onAssistantDelta?.(update.assistantDelta);
+    }
+    if (update.audioDelta) {
+      this.beginTurn();
+      this.mark("first_audio");
+    }
     if (update.outputTokens) this.outputTokens += update.outputTokens;
     if (update.speechStarted) this.handlers.onSpeechStarted?.();
-    if (update.interrupted) this.handlers.onInterrupted?.();
-    if (update.responseDone) this.handlers.onResponseDone?.();
+    if (update.interrupted) {
+      this.interrupted = true;
+      this.handlers.onInterrupted?.();
+    }
+    if (update.functionCall) {
+      this.beginTurn();
+      this.pendingCalls.push(update.functionCall);
+    }
+    if (update.responseDone) {
+      this.mark("done");
+      if (this.pendingCalls.length === 0) {
+        this.completeTurn();
+      } else {
+        const calls = this.pendingCalls;
+        this.pendingCalls = [];
+        void this.resolveCalls(calls);
+      }
+    }
     if (update.error) this.handlers.onError?.(update.error);
+  }
+
+  private async resolveCalls(calls: RealtimeFunctionCallPayload[]): Promise<void> {
+    if (this.toolRound >= MAX_TOOL_ROUNDS) {
+      const output = JSON.stringify({
+        ok: false,
+        reason: "The live tool round limit was reached.",
+      });
+      for (const call of calls) this.safeSendOutput(call.callId, output);
+      this.completeTurn();
+      return;
+    }
+    this.toolRound += 1;
+
+    for (const call of calls) {
+      let output: string;
+      try {
+        output = this.handlers.onToolCall
+          ? await this.handlers.onToolCall(call)
+          : JSON.stringify({ ok: false, reason: "Tool execution is unavailable." });
+      } catch (err) {
+        output = JSON.stringify({
+          ok: false,
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+      this.safeSendOutput(call.callId, output);
+    }
+
+    const channel = this.channel;
+    if (channel?.readyState === "open" && !this.stopped) {
+      channel.send(JSON.stringify({ type: "response.create" }));
+    }
+  }
+
+  private safeSendOutput(callId: string, output: string): void {
+    const channel = this.channel;
+    if (!channel || channel.readyState !== "open" || this.stopped) return;
+    this.sendFunctionOutput(channel, callId, output);
+  }
+
+  private sendFunctionOutput(
+    channel: RTCDataChannel,
+    callId: string,
+    output: string,
+  ): void {
+    channel.send(
+      JSON.stringify({
+        type: "conversation.item.create",
+        item: { type: "function_call_output", call_id: callId, output },
+      }),
+    );
+  }
+
+  private beginTurn(): void {
+    if (this.turnStartedAt > 0) return;
+    this.turnStartedAt = performance.now();
+    this.turnMilestones = {};
+    this.interrupted = false;
+    this.toolRound = 0;
+  }
+
+  private mark(name: Milestone): void {
+    if (this.turnStartedAt === 0 || this.turnMilestones[name] !== undefined) {
+      return;
+    }
+    this.turnMilestones[name] = Math.max(
+      0,
+      Math.round(performance.now() - this.turnStartedAt),
+    );
+  }
+
+  private completeTurn(): void {
+    if (this.turnStartedAt === 0) return;
+    this.mark("complete");
+    const milestonesMs = { ...this.turnMilestones };
+    const elapsedMs = Math.max(
+      0,
+      Math.round(performance.now() - this.turnStartedAt),
+    );
+    const metrics: RealtimeTurnMetrics = {
+      elapsedMs,
+      milestonesMs,
+      stagesMs: deriveStages(milestonesMs),
+      interrupted: this.interrupted,
+    };
+    this.turnStartedAt = 0;
+    this.turnMilestones = {};
+    this.pendingCalls = [];
+    this.toolRound = 0;
+    this.interrupted = false;
+    this.handlers.onResponseDone?.(metrics);
+  }
+
+  private notifyClosed(): void {
+    if (this.closedNotified) return;
+    this.closedNotified = true;
+    this.handlers.onClosed?.();
   }
 
   private watchChannel(channel: RTCDataChannel): Promise<void> {
@@ -278,7 +469,7 @@ export class RealtimeVoiceSession {
           window.clearTimeout(timer);
           if (!this.stopped) {
             void this.stop();
-            this.handlers.onClosed?.();
+            this.notifyClosed();
           }
           reject(new Error("The Realtime data channel closed."));
         },
@@ -322,4 +513,24 @@ export class RealtimeVoiceSession {
     this.peer?.close();
     this.peer = null;
   }
+}
+
+function deriveStages(
+  milestones: Partial<Record<Milestone, number>>,
+): Partial<Record<Stage, number>> {
+  const stages: Partial<Record<Stage, number>> = {};
+  if (milestones.transcript !== undefined) stages.stt = milestones.transcript;
+  if (
+    milestones.transcript !== undefined &&
+    milestones.first_delta !== undefined
+  ) {
+    stages.llm = Math.max(0, milestones.first_delta - milestones.transcript);
+  }
+  if (
+    milestones.first_delta !== undefined &&
+    milestones.first_audio !== undefined
+  ) {
+    stages.tts = Math.max(0, milestones.first_audio - milestones.first_delta);
+  }
+  return stages;
 }

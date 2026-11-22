@@ -17,7 +17,11 @@ import {
   WaveBars,
   type Entry,
 } from "./voice-agent/Messages";
-import { RealtimeVoiceSession } from "./voice-agent/realtime";
+import {
+  RealtimeVoiceSession,
+  type RealtimeFunctionCallPayload,
+  type RealtimeTurnMetrics,
+} from "./voice-agent/realtime";
 import { ApiError, consumeSse, errorFromResponse } from "./voice-agent/stream";
 import { useAudioQueue } from "./voice-agent/useAudioQueue";
 import { useRecorder } from "./voice-agent/useRecorder";
@@ -140,6 +144,8 @@ export default function VoiceAgent() {
   const liveRef = useRef<RealtimeVoiceSession | null>(null);
   const liveUserEntryRef = useRef<string | null>(null);
   const liveAgentEntryRef = useRef<string | null>(null);
+  const liveUserTextRef = useRef("");
+  const liveAssistantTextRef = useRef("");
   const textBufferRef = useRef<Map<string, string>>(new Map());
   const flushFrameRef = useRef<number | null>(null);
   const hydratedRef = useRef("");
@@ -394,6 +400,77 @@ export default function VoiceAgent() {
     setAccessCode(code);
   }
 
+  async function executeLiveTool(call: RealtimeFunctionCallPayload): Promise<string> {
+    setStatus("thinking");
+    try {
+      const response = await fetch("/api/realtime/tool", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({
+          session_id: sessionRef.current,
+          call_id: call.callId,
+          name: call.name,
+          arguments: call.argumentsJson,
+        }),
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        handleUnauthorized(response);
+        throw await errorFromResponse(response);
+      }
+      const data = (await response.json()) as { output?: unknown };
+      return typeof data.output === "string"
+        ? data.output
+        : JSON.stringify({ ok: false, reason: "The tool returned no output." });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      addEntry("error", `Live tool failed: ${message}`);
+      return JSON.stringify({ ok: false, reason: message });
+    }
+  }
+
+  async function commitLiveTurn(metrics: RealtimeTurnMetrics): Promise<void> {
+    const userText = liveUserTextRef.current.trim();
+    const assistantText = liveAssistantTextRef.current.trim();
+    liveUserTextRef.current = "";
+    liveAssistantTextRef.current = "";
+    flushNow();
+    setStatus("live");
+
+    if (!userText && !assistantText) return;
+
+    try {
+      const response = await fetch("/api/realtime/turn", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({
+          session_id: sessionRef.current,
+          user_text: userText,
+          assistant_text: assistantText,
+          interrupted: metrics.interrupted,
+          elapsed_ms: metrics.elapsedMs,
+          milestones_ms: metrics.milestonesMs,
+          stages_ms: metrics.stagesMs,
+        }),
+        cache: "no-store",
+      });
+      if (!response.ok) {
+        handleUnauthorized(response);
+        throw await errorFromResponse(response);
+      }
+      applyWorkflow((await response.json()) as WorkflowPayload);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      addEntry("error", `Could not save the live turn: ${message}`);
+    }
+  }
+
   async function startLive() {
     if (!realtimeAvailable || liveRef.current || busy) return;
 
@@ -402,6 +479,8 @@ export default function VoiceAgent() {
     flushNow();
     liveUserEntryRef.current = null;
     liveAgentEntryRef.current = null;
+    liveUserTextRef.current = "";
+    liveAssistantTextRef.current = "";
 
     const session = new RealtimeVoiceSession({
       onUserDelta: (delta) => {
@@ -413,6 +492,7 @@ export default function VoiceAgent() {
       },
       onUserTranscript: (transcript) => {
         flushNow();
+        liveUserTextRef.current = transcript;
         if (liveUserEntryRef.current) {
           replaceEntryText(liveUserEntryRef.current, transcript);
         } else {
@@ -422,6 +502,7 @@ export default function VoiceAgent() {
         setStatus("thinking");
       },
       onAssistantDelta: (delta) => {
+        liveAssistantTextRef.current += delta;
         if (!liveAgentEntryRef.current) {
           flushNow();
           liveAgentEntryRef.current = addEntry("agent", "");
@@ -439,13 +520,10 @@ export default function VoiceAgent() {
         liveAgentEntryRef.current = null;
         setStatus("live");
       },
-      onResponseDone: () => {
-        flushNow();
-        liveUserEntryRef.current = null;
-        liveAgentEntryRef.current = null;
-        setStatus("live");
-        void loadWorkflow(sessionRef.current);
+      onResponseDone: (metrics) => {
+        void commitLiveTurn(metrics);
       },
+      onToolCall: (call) => executeLiveTool(call),
       onError: (message) => addEntry("error", message),
       onAudioBlocked: () =>
         addEntry("error", "Your browser blocked live audio. Tap Sound on to listen."),
@@ -578,6 +656,8 @@ export default function VoiceAgent() {
 
     if (liveMode && liveRef.current) {
       addEntry("user", message);
+      liveUserTextRef.current = message;
+      liveAssistantTextRef.current = "";
       setStatus("thinking");
       try {
         liveRef.current.sendText(message);
@@ -710,6 +790,8 @@ export default function VoiceAgent() {
     setLiveMode(false);
     liveUserEntryRef.current = null;
     liveAgentEntryRef.current = null;
+    liveUserTextRef.current = "";
+    liveAssistantTextRef.current = "";
     setEntries([]);
     setDraft("");
     setWorkflow(null);
