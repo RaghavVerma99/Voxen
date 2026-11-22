@@ -5,6 +5,7 @@ function toNumber(value: string | undefined, fallback: number): number {
 }
 
 export type SearchProvider = "auto" | "tavily" | "duckduckgo";
+export type StateBackendName = "memory" | "file";
 
 export type TtsProvider = "speech" | "realtime";
 export type TtsFallbackProvider = TtsProvider | "none";
@@ -13,6 +14,10 @@ function toSearchProvider(value: string | undefined): SearchProvider {
   const normalized = (value ?? "").trim().toLowerCase();
   if (normalized === "tavily" || normalized === "duckduckgo") return normalized;
   return "auto";
+}
+
+function toStateBackend(value: string | undefined): StateBackendName {
+  return (value ?? "").trim().toLowerCase() === "file" ? "file" : "memory";
 }
 
 function toTtsProvider(value: string | undefined, fallback: TtsProvider): TtsProvider {
@@ -113,6 +118,14 @@ export const config = {
   searchProvider: toSearchProvider(process.env.SEARCH_PROVIDER),
   tavilyApiKey: process.env.TAVILY_API_KEY ?? "",
   searchTimeoutMs: toNumber(process.env.SEARCH_TIMEOUT_MS, 8_000),
+
+  // Shared state. `memory` is per process; `file` shares one atomic document
+  // across instances on the same host or mounted volume. Redis/Postgres can
+  // implement the same contract when state must span machines.
+  stateBackend: toStateBackend(process.env.STATE_BACKEND),
+  stateStorePath: process.env.STATE_STORE_PATH ?? ".data/voxen-state.json",
+  stateLockTimeoutMs: toNumber(process.env.STATE_LOCK_TIMEOUT_MS, 5_000),
+  stateLockStaleMs: toNumber(process.env.STATE_LOCK_STALE_MS, 10_000),
 
   // Conversation state
   maxHistoryMessages: toNumber(process.env.MAX_HISTORY_MESSAGES, 20),

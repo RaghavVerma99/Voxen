@@ -13,6 +13,35 @@ describe("runtime module mode", () => {
   });
 });
 
+describe("shared state configuration", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("defaults to the in-memory backend with a durable file path available", async () => {
+    vi.stubEnv("STATE_BACKEND", undefined);
+    vi.stubEnv("STATE_STORE_PATH", undefined);
+    vi.resetModules();
+
+    const { config } = await import("@/lib/config");
+
+    expect(config.stateBackend).toBe("memory");
+    expect(config.stateStorePath).toBe(".data/voxen-state.json");
+  });
+
+  it("accepts the file backend override", async () => {
+    vi.stubEnv("STATE_BACKEND", "file");
+    vi.stubEnv("STATE_STORE_PATH", ".data/shared.json");
+    vi.resetModules();
+
+    const { config } = await import("@/lib/config");
+
+    expect(config.stateBackend).toBe("file");
+    expect(config.stateStorePath).toBe(".data/shared.json");
+  });
+});
+
 describe("workflow TTL configuration", () => {
   afterEach(() => {
     vi.unstubAllEnvs();

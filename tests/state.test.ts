@@ -1,0 +1,131 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { config } from "@/lib/config";
+import {
+  createFileStateBackend,
+  createMemoryStateBackend,
+  useStateBackendForTests,
+  type StateBackend,
+} from "@/lib/state";
+import { consumeDailyBudget, rateLimit } from "@/lib/ratelimit";
+import { addMessage, getHistory } from "@/lib/conversation";
+import { startRealtimeSession } from "@/lib/realtime-budget";
+
+const directories: string[] = [];
+let contractPath = "";
+
+async function tempDir(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "voxen-state-"));
+  directories.push(directory);
+  return directory;
+}
+
+beforeAll(async () => {
+  contractPath = join(await tempDir(), "contract.json");
+});
+
+afterEach(() => {
+  useStateBackendForTests(createMemoryStateBackend());
+});
+
+afterAll(async () => {
+  await Promise.all(
+    directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
+
+function contract(name: string, make: () => StateBackend): void {
+  describe(`${name} backend contract`, () => {
+    it("round-trips nested state through read and write", () => {
+      const backend = make();
+      backend.write((document) => {
+        document.counters["turn.ok"] = 3;
+        document.sessions["abc"] = {
+          messages: [{ role: "user", content: "hello" }],
+          createdAt: 1,
+          lastAccessAt: 2,
+        };
+      });
+
+      expect(backend.read((document) => document.counters["turn.ok"])).toBe(3);
+      expect(
+        backend.read((document) => document.sessions["abc"].messages[0].content),
+      ).toBe("hello");
+    });
+
+    it("resets one section without touching the others", () => {
+      const backend = make();
+      backend.write((document) => {
+        document.counters["turn.ok"] = 1;
+        document.samples["turn.total"] = [10];
+      });
+
+      backend.reset("samples");
+
+      expect(backend.read((document) => document.counters["turn.ok"])).toBe(1);
+      expect(backend.read((document) => document.samples["turn.total"])).toBeUndefined();
+    });
+  });
+}
+
+contract("memory", () => createMemoryStateBackend());
+contract("file", () => createFileStateBackend(contractPath));
+
+describe("file backend", () => {
+  it("shares one document across instances using the same file", async () => {
+    const path = join(await tempDir(), "state.json");
+    const first = createFileStateBackend(path);
+    const second = createFileStateBackend(path);
+
+    first.write((document) => {
+      document.counters["shared"] = 7;
+    });
+
+    expect(second.read((document) => document.counters["shared"])).toBe(7);
+    expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
+      counters: { shared: 7 },
+    });
+  });
+
+  it("fails closed on a corrupt state file", async () => {
+    const path = join(await tempDir(), "state.json");
+    await writeFile(path, "{not json", "utf8");
+    const backend = createFileStateBackend(path);
+
+    expect(() => backend.read((document) => document.rate)).toThrow();
+  });
+
+  it("backs all stateful modules with the selected adapter", async () => {
+    const path = join(await tempDir(), "state.json");
+    const shared = createFileStateBackend(path);
+    useStateBackendForTests(shared);
+
+    const originalRequests = config.rateLimitRequests;
+    const originalBudget = config.dailyRequestBudget;
+    config.rateLimitRequests = 1;
+    config.dailyRequestBudget = 1;
+    try {
+      expect(rateLimit("shared-key").allowed).toBe(true);
+      expect(rateLimit("shared-key").allowed).toBe(false);
+      expect(consumeDailyBudget()).toBe(true);
+      expect(consumeDailyBudget()).toBe(false);
+      addMessage("shared-session", "user", "hello");
+      expect(getHistory("shared-session")[0].content).toBe("hello");
+      startRealtimeSession("shared-session");
+    } finally {
+      config.rateLimitRequests = originalRequests;
+      config.dailyRequestBudget = originalBudget;
+    }
+
+    expect(
+      shared.read((document) => ({
+        rate: document.rate["shared-key"].count,
+        budget: document.budget.used,
+        message: document.sessions["shared-session"].messages[1]?.content,
+        sessions: document.realtime["shared-session"].sessions,
+      })),
+    ).toEqual({ rate: 2, budget: 1, message: "hello", sessions: 1 });
+  });
+});

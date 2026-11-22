@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { stateBackend } from "./state";
 
 export const MILESTONES = [
   "transcript",
@@ -45,8 +46,6 @@ export interface MetricsSnapshot {
 }
 
 const MAX_SAMPLES = 500;
-const counters = new Map<string, number>();
-const samples = new Map<string, number[]>();
 
 function round(value: number): number {
   return Math.round(value * 10) / 10;
@@ -63,37 +62,46 @@ function percentile(values: number[], ratio: number): number {
 }
 
 export function recordTiming(name: string, durationMs: number): void {
-  const values = samples.get(name) ?? [];
-  values.push(Math.max(0, durationMs));
-  if (values.length > MAX_SAMPLES) values.shift();
-  samples.set(name, values);
+  stateBackend().write((document) => {
+    const values = document.samples[name] ?? [];
+    values.push(Math.max(0, durationMs));
+    if (values.length > MAX_SAMPLES) values.shift();
+    document.samples[name] = values;
+  });
 }
 
 export function incrementCounter(name: string, by = 1): void {
-  counters.set(name, (counters.get(name) ?? 0) + by);
+  stateBackend().write((document) => {
+    document.counters[name] = (document.counters[name] ?? 0) + by;
+  });
 }
 
 export function telemetrySnapshot(): MetricsSnapshot {
-  const timings: Record<string, TimingStats> = {};
-  for (const [name, values] of samples) {
-    timings[name] = {
-      count: values.length,
-      p50: percentile(values, 0.5),
-      p95: percentile(values, 0.95),
-      max: round(Math.max(...values)),
+  return stateBackend().read((document) => {
+    const timings: Record<string, TimingStats> = {};
+    for (const [name, values] of Object.entries(document.samples)) {
+      timings[name] = {
+        count: values.length,
+        p50: percentile(values, 0.5),
+        p95: percentile(values, 0.95),
+        max: round(Math.max(...values)),
+      };
+    }
+    return {
+      counters: Object.fromEntries(
+        Object.entries(document.counters).sort(([a], [b]) => a.localeCompare(b)),
+      ),
+      timings: Object.fromEntries(
+        Object.entries(timings).sort(([a], [b]) => a.localeCompare(b)),
+      ),
     };
-  }
-  return {
-    counters: Object.fromEntries([...counters].sort(([a], [b]) => a.localeCompare(b))),
-    timings: Object.fromEntries(
-      Object.entries(timings).sort(([a], [b]) => a.localeCompare(b)),
-    ),
-  };
+  });
 }
 
 export function resetTelemetry(): void {
-  counters.clear();
-  samples.clear();
+  const backend = stateBackend();
+  backend.reset("counters");
+  backend.reset("samples");
 }
 
 /** Stable error label for trace counters, without importing the HTTP layer. */

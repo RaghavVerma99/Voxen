@@ -210,9 +210,20 @@ Next.js loads `.env.local` for `dev`, `build`, and `start`. On a host, set the s
 | `MAX_VOICE_REQUEST_BYTES` | `4718592` | Multipart request cap. |
 | `RATE_LIMIT_REQUESTS` | `20` | Per client, per route group, per window. |
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Window length. |
-| `DAILY_REQUEST_BUDGET` | `1000` | Process-wide AI request cap per UTC day. |
+| `DAILY_REQUEST_BUDGET` | `1000` | Shared AI request cap per UTC day. |
 | `TURN_TIMEOUT_MS` | `90000` | Hard cap for one streamed turn. |
 | `SSE_HEARTBEAT_MS` | `15000` | Keep-alive cadence. |
+
+### Shared state
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `STATE_BACKEND` | `memory` | `memory` is per process; `file` shares one atomic document across instances on the same host or mounted volume. |
+| `STATE_STORE_PATH` | `.data/voxen-state.json` | State document for the `file` backend. Must be writable by every instance. |
+| `STATE_LOCK_TIMEOUT_MS` | `5000` | Max wait for the cross-process file lock. |
+| `STATE_LOCK_STALE_MS` | `10000` | Age at which an abandoned lock may be reclaimed. |
+
+The `StateBackend` contract in `lib/state/contract.ts` exposes atomic `read`/`write`/`reset` operations over one document. Rate limits, the daily budget, conversation history, Realtime usage, and telemetry all go through it, so switching to `file` makes those caps shared without changing route code. Workflow bookings keep their own atomic file and audit trail; a corrupt state file fails closed rather than resetting caps. Redis/Postgres adapters can implement the same contract when instances run on different machines.
 
 ### Workflow
 
@@ -277,7 +288,7 @@ A missing or invalid `audio_duration` returns `400 INVALID_AUDIO_DURATION` befor
 | --- | --- |
 | `GET /api/health` | Public liveness. Includes `access_required` and `realtime_enabled`. `?verify=1` checks an access code; `?detail=1` adds config, budget, sessions, workflow stats, and TTS chain. Both query modes are guarded. |
 | `GET /api/ready` | Orchestrator readiness. Fails when AI is missing or production access is misconfigured. |
-| `GET /api/metrics` | Guarded in-process telemetry. Consumes no AI budget and exposes no transcript content. |
+| `GET /api/metrics` | Guarded state-backend telemetry. Consumes no AI budget and exposes no transcript content. |
 
 Example `/api/metrics` shape:
 
@@ -292,7 +303,7 @@ Example `/api/metrics` shape:
 }
 ```
 
-Traces are also emitted as structured `turn.trace` log events with milestones `transcript`, `first_delta`, `done`, `first_audio`, `complete`; stages `stt`, `llm`, `tts`; a request id; and a hashed session id. Live turns replay browser-measured markers and add a `transport: "realtime"` field plus `turn.transport.realtime` / `realtime.interrupted` counters. Values are in-process and bounded to the last 500 samples per metric.
+Traces are also emitted as structured `turn.trace` log events with milestones `transcript`, `first_delta`, `done`, `first_audio`, `complete`; stages `stt`, `llm`, `tts`; a request id; and a hashed session id. Live turns replay browser-measured markers and add a `transport: "realtime"` field plus `turn.transport.realtime` / `realtime.interrupted` counters. Values live in the selected state backend and are bounded to the last 500 samples per metric.
 
 ### Workflow and sharing
 
@@ -366,14 +377,14 @@ An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTT
 - Errors expose stable codes and request ids without stack traces.
 - The Docker image runs as a non-root user and checks `/api/ready`.
 
-**Scaling boundary:** rate limits, budget, session history, telemetry, Realtime usage, and the workflow file are per process. Move them to Redis/Postgres before running multiple instances that must share hard caps or booking state.
+**Scaling boundary:** with `STATE_BACKEND=memory` all state is per process. Set `STATE_BACKEND=file` with a shared volume to share rate limits, budget, history, Realtime usage, and telemetry across local instances; workflow bookings already use their own atomic file. Use a Redis/Postgres implementation of `StateBackend` before running instances on different machines that must share hard caps.
 
 ---
 
 ## Testing and evals
 
 ```bash
-npm run check          # typecheck + 141 unit tests
+npm run check          # typecheck + 150 unit tests
 npm test               # Vitest, no network or API key
 npm run test:e2e       # Playwright browser E2E (7 scenarios)
 npm run test:e2e:install # installs the Chromium binary once
@@ -394,6 +405,7 @@ Unit tests need no API key or network. Coverage includes:
 - scheduling tools, session-scoped workflow state, one-time confirmations, summaries, share expiry, and revocation
 - Realtime token/usage routes, concurrent session caps, CSP policy, and event parsing
 - Realtime tool execution, deferred turn commits, session reservation release, and browser data-channel behavior
+- shared-state contract for memory/file backends, cross-instance visibility, fail-closed corrupt state, and module integration
 
 Playwright mocks the OpenAI/app routes and runs the real browser client. `playwright.config.ts` starts a dev server on port 3100 with a placeholder key, Realtime flagged on, and access codes disabled. The E2E suite covers:
 
@@ -430,7 +442,7 @@ docker build -t voxen .
 docker run --env-file .env.local -p 3000:3000 voxen
 ```
 
-Mount a writable volume and set `WORKFLOW_STORE_PATH` for appointment state that survives container replacement. For example, use `WORKFLOW_STORE_PATH=/data/voxen-workflow.json` and mount `/data` with permissions for uid 1001.
+Mount a writable volume and set `WORKFLOW_STORE_PATH` for appointment state that survives container replacement. For multi-instance caps on one host, also set `STATE_BACKEND=file` and `STATE_STORE_PATH=/data/voxen-state.json` on the same volume. Mount `/data` with permissions for uid 1001.
 
 ### Production checklist
 
@@ -439,7 +451,7 @@ Mount a writable volume and set `WORKFLOW_STORE_PATH` for appointment state that
 - Confirm `/api/ready` returns `ready` and the expected TTS chain.
 - Watch `/api/metrics` for p95 latency and provider failures.
 - Keep `REALTIME_ENABLED=false` until you have tested the flag with your account and browser matrix.
-- Use one instance, or move all in-process state to shared stores first.
+- Use `STATE_BACKEND=file` with a shared volume for local multi-instance caps, or implement the state contract on Redis/Postgres across machines.
 - Set `TTS_FALLBACK_PROVIDER=none` after the legacy Speech API shutdown.
 
 ---
@@ -482,12 +494,13 @@ lib/
   telemetry.ts evals.ts workflow-store.ts workflow-tools.ts workflow-summary.ts
   realtime-budget.ts realtime-events.ts csp.ts config.ts
   guard.ts ratelimit.ts conversation.ts session-lock.ts
+  state/contract.ts state/memory.ts state/file.ts state/index.ts
   tools.ts body.ts validate.ts errors.ts http.ts logger.ts sse.ts sse-response.ts
 proxy.ts                          CSP nonce + document policy
 evals/dataset.json                offline eval cases
 scripts/evals.mts                 eval runner
 scripts/start.mjs                 standalone launcher
-tests/                            16 test files, 141 unit tests
+tests/                            17 test files, 150 unit tests
 e2e/                              Playwright browser scenarios
 playwright.config.ts              E2E web server + browser config
 Dockerfile next.config.mjs vitest.config.mts
@@ -507,7 +520,7 @@ Dockerfile next.config.mjs vitest.config.mts
 
 ## Roadmap
 
-1. **Shared infrastructure** — Redis/Postgres for sessions, rate limits, budgets, and bookings so caps hold across instances.
+1. **Remote shared state** — Redis/Postgres implementations of `StateBackend` and a shared workflow store for multi-machine fleets.
 2. **Stronger evals** — live provider replay, regression gates in CI, and scenario-level scoring.
 3. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
 4. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.

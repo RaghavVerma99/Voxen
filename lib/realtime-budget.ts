@@ -1,28 +1,27 @@
 import { config } from "./config";
 import { AppError } from "./errors";
+import { stateBackend, type StateDocument, type StoredRealtimeUsage } from "./state";
 
-export interface RealtimeUsage {
-  sessions: number;
-  audioSeconds: number;
-  outputTokens: number;
-  updatedAt: string;
-}
+export interface RealtimeUsage extends StoredRealtimeUsage {}
 
 const MAX_TRACKED_SESSIONS = 1_000;
-const usage = new Map<string, RealtimeUsage>();
 
-function fresh(): RealtimeUsage {
-  return { sessions: 0, audioSeconds: 0, outputTokens: 0, updatedAt: new Date().toISOString() };
-}
-
-function get(sessionId: string): RealtimeUsage {
-  let record = usage.get(sessionId);
+function get(document: StateDocument, sessionId: string): StoredRealtimeUsage {
+  let record = document.realtime[sessionId];
   if (!record) {
-    record = fresh();
-    usage.set(sessionId, record);
-    if (usage.size > MAX_TRACKED_SESSIONS) {
-      const oldest = usage.keys().next().value;
-      if (oldest !== undefined && oldest !== sessionId) usage.delete(oldest);
+    record = {
+      sessions: 0,
+      audioSeconds: 0,
+      outputTokens: 0,
+      updatedAt: new Date().toISOString(),
+    };
+    document.realtime[sessionId] = record;
+    const keys = Object.keys(document.realtime);
+    if (keys.length > MAX_TRACKED_SESSIONS) {
+      const oldest = keys[0];
+      if (oldest !== undefined && oldest !== sessionId) {
+        delete document.realtime[oldest];
+      }
     }
   }
   return record;
@@ -30,31 +29,35 @@ function get(sessionId: string): RealtimeUsage {
 
 /** Reserves one WebRTC session before an ephemeral token is minted. */
 export function startRealtimeSession(sessionId: string): void {
-  const record = get(sessionId);
-  if (record.sessions >= config.realtimeMaxSessions) {
-    throw new AppError(
-      "BUDGET_EXHAUSTED",
-      "Realtime session limit reached for this conversation.",
-      429,
-    );
-  }
-  record.sessions += 1;
-  record.updatedAt = new Date().toISOString();
+  stateBackend().write((document) => {
+    const record = get(document, sessionId);
+    if (record.sessions >= config.realtimeMaxSessions) {
+      throw new AppError(
+        "BUDGET_EXHAUSTED",
+        "Realtime session limit reached for this conversation.",
+        429,
+      );
+    }
+    record.sessions += 1;
+    record.updatedAt = new Date().toISOString();
+  });
 }
 
 /** Refunds a reservation when upstream token creation fails. */
 export function releaseRealtimeSession(sessionId: string): void {
-  const record = usage.get(sessionId);
-  if (!record || record.sessions === 0) return;
-  record.sessions -= 1;
-  record.updatedAt = new Date().toISOString();
-  if (
-    record.sessions === 0 &&
-    record.audioSeconds === 0 &&
-    record.outputTokens === 0
-  ) {
-    usage.delete(sessionId);
-  }
+  stateBackend().write((document) => {
+    const record = document.realtime[sessionId];
+    if (!record || record.sessions === 0) return;
+    record.sessions -= 1;
+    record.updatedAt = new Date().toISOString();
+    if (
+      record.sessions === 0 &&
+      record.audioSeconds === 0 &&
+      record.outputTokens === 0
+    ) {
+      delete document.realtime[sessionId];
+    }
+  });
 }
 
 function validNumber(value: unknown): value is number {
@@ -80,31 +83,35 @@ export function recordRealtimeUsage(
     );
   }
 
-  const record = get(sessionId);
-  const nextAudio = record.audioSeconds + audioSeconds;
-  const nextTokens = record.outputTokens + outputTokens;
-  if (
-    nextAudio > config.realtimeMaxAudioSeconds ||
-    nextTokens > config.realtimeMaxOutputTokens
-  ) {
-    throw new AppError(
-      "BUDGET_EXHAUSTED",
-      "Realtime audio or token budget exceeded for this conversation.",
-      429,
-    );
-  }
+  return stateBackend().write((document) => {
+    const record = get(document, sessionId);
+    const nextAudio = record.audioSeconds + audioSeconds;
+    const nextTokens = record.outputTokens + outputTokens;
+    if (
+      nextAudio > config.realtimeMaxAudioSeconds ||
+      nextTokens > config.realtimeMaxOutputTokens
+    ) {
+      throw new AppError(
+        "BUDGET_EXHAUSTED",
+        "Realtime audio or token budget exceeded for this conversation.",
+        429,
+      );
+    }
 
-  record.audioSeconds = nextAudio;
-  record.outputTokens = nextTokens;
-  record.updatedAt = new Date().toISOString();
-  return { ...record };
+    record.audioSeconds = nextAudio;
+    record.outputTokens = nextTokens;
+    record.updatedAt = new Date().toISOString();
+    return { ...record };
+  });
 }
 
 export function realtimeUsageSnapshot(sessionId: string): RealtimeUsage | null {
-  const record = usage.get(sessionId);
-  return record ? { ...record } : null;
+  return stateBackend().read((document) => {
+    const record = document.realtime[sessionId];
+    return record ? { ...record } : null;
+  });
 }
 
 export function resetRealtimeBudget(): void {
-  usage.clear();
+  stateBackend().reset("realtime");
 }
