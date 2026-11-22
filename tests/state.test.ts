@@ -55,6 +55,38 @@ function contract(name: string, make: () => StateBackend): void {
       ).toBe("hello");
     });
 
+    it("round-trips account and usage records", () => {
+      const backend = make();
+      backend.write((document) => {
+        document.accounts["acct-1"] = {
+          id: "acct-1",
+          name: "Ada",
+          email: "ada@example.com",
+          keyHash: "hash",
+          plan: "pro",
+          role: "user",
+          status: "active",
+          createdAt: "2026-11-22T00:00:00.000Z",
+        };
+        document.usage["acct-1:2026-11-22"] = {
+          accountId: "acct-1",
+          date: "2026-11-22",
+          requests: 3,
+          audioSeconds: 12,
+          outputTokens: 50,
+          costMicros: 100,
+          updatedAt: "2026-11-22T00:00:00.000Z",
+        };
+      });
+
+      expect(
+        backend.read((document) => ({
+          plan: document.accounts["acct-1"].plan,
+          requests: document.usage["acct-1:2026-11-22"].requests,
+        })),
+      ).toEqual({ plan: "pro", requests: 3 });
+    });
+
     it("resets one section without touching the others", () => {
       const backend = make();
       backend.write((document) => {

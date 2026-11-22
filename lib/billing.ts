@@ -145,24 +145,31 @@ export function releaseRequestBudget(
   return refunded;
 }
 
+/** Adds provider-reported Realtime usage to an open state document. */
+export function meterRealtimeUsage(
+  document: StateDocument,
+  identity: IdentityContext,
+  input: { audioSeconds?: number; outputTokens?: number },
+): void {
+  const date = utcDate();
+  const plan = PLANS[identity.plan];
+  const usage = getUsage(document, identity.accountId, date);
+  const audioSeconds = input.audioSeconds ?? 0;
+  const outputTokens = input.outputTokens ?? 0;
+  usage.audioSeconds += audioSeconds;
+  usage.outputTokens += outputTokens;
+  usage.costMicros += Math.round(
+    audioSeconds * plan.audioSecondMicros + outputTokens * plan.outputTokenMicros,
+  );
+  usage.updatedAt = new Date().toISOString();
+}
+
 /** Adds provider-reported Realtime usage to the account's meter. */
 export function recordRealtimeMetering(
   identity: IdentityContext,
   input: { audioSeconds?: number; outputTokens?: number },
 ): void {
-  const date = utcDate();
-  stateBackend().write((document) => {
-    const plan = PLANS[identity.plan];
-    const usage = getUsage(document, identity.accountId, date);
-    const audioSeconds = input.audioSeconds ?? 0;
-    const outputTokens = input.outputTokens ?? 0;
-    usage.audioSeconds += audioSeconds;
-    usage.outputTokens += outputTokens;
-    usage.costMicros += Math.round(
-      audioSeconds * plan.audioSecondMicros + outputTokens * plan.outputTokenMicros,
-    );
-    usage.updatedAt = new Date().toISOString();
-  });
+  stateBackend().write((document) => meterRealtimeUsage(document, identity, input));
 }
 
 export function usageSnapshot(identity: IdentityContext): StoredUsage {
@@ -189,6 +196,41 @@ export function quotaSnapshot(identity: IdentityContext): {
     limit: plan.dailyRequests,
     remaining: Math.max(0, plan.dailyRequests - usage.requests),
   };
+}
+
+export interface UsageReport {
+  rows: StoredUsage[];
+  totals: {
+    requests: number;
+    audioSeconds: number;
+    outputTokens: number;
+    costMicros: number;
+  };
+}
+
+/** All account usage rows plus totals, newest first. */
+export function usageReport(): UsageReport {
+  return stateBackend().read((document) => {
+    const rows = Object.values(document.usage)
+      .map((row) => ({ ...row }))
+      .sort((left, right) =>
+        left.date === right.date
+          ? left.accountId.localeCompare(right.accountId)
+          : right.date.localeCompare(left.date),
+      );
+    return {
+      rows,
+      totals: rows.reduce(
+        (total, row) => ({
+          requests: total.requests + row.requests,
+          audioSeconds: total.audioSeconds + row.audioSeconds,
+          outputTokens: total.outputTokens + row.outputTokens,
+          costMicros: total.costMicros + row.costMicros,
+        }),
+        { requests: 0, audioSeconds: 0, outputTokens: 0, costMicros: 0 },
+      ),
+    };
+  });
 }
 
 export interface BillingLine {

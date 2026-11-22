@@ -83,6 +83,21 @@ describe("account identities", () => {
     );
   });
 
+  it("accepts the bootstrap admin key even when identity mode is enabled", () => {
+    config.identityRequired = true;
+    config.identitySecret = "";
+    const headers = { "x-admin-key": config.adminApiKey };
+
+    expect(identityFromRequest(request(headers))).toMatchObject({
+      accountId: "bootstrap-admin",
+      role: "admin",
+    });
+    expect(requireAdmin(request(headers))).toMatchObject({
+      accountId: "bootstrap-admin",
+      role: "admin",
+    });
+  });
+
   it("fails closed when identity mode lacks a signing secret", () => {
     config.identityRequired = true;
     config.identitySecret = "";

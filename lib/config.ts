@@ -189,7 +189,8 @@ export const config = {
   identitySecret: process.env.IDENTITY_SECRET ?? "",
   minIdentitySecretLength: toNumber(process.env.MIN_IDENTITY_SECRET_LENGTH, 16),
   identityRequired: process.env.IDENTITY_REQUIRED === "true",
-  adminApiKey: process.env.ADMIN_API_KEY ?? "",
+  adminApiKey: (process.env.ADMIN_API_KEY ?? "").trim(),
+  minAdminKeyLength: toNumber(process.env.MIN_ADMIN_KEY_LENGTH, 16),
 
   // Shared access code. Production refuses paid traffic unless this is a
   // long enough secret, so a misconfigured deploy cannot expose the API.
@@ -239,3 +240,11 @@ export const isProductionAccessMisconfigured = (): boolean =>
 export const isIdentityMisconfigured = (): boolean =>
   config.identityRequired &&
   config.identitySecret.trim().length < config.minIdentitySecretLength;
+
+/**
+ * The bootstrap admin key is a bearer secret too. When one is configured in
+ * production, refuse to use it unless it is long enough to resist guessing.
+ */
+export const isAdminKeyMisconfigured = (): boolean =>
+  config.adminApiKey.length > 0 &&
+  config.adminApiKey.length < config.minAdminKeyLength;

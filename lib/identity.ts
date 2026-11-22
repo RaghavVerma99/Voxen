@@ -1,8 +1,18 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  randomUUID,
+  timingSafeEqual,
+} from "node:crypto";
 import type { NextRequest } from "next/server";
 
 import { isPlanName, PLANS } from "./billing";
-import { config, isIdentityMisconfigured } from "./config";
+import {
+  config,
+  isAdminKeyMisconfigured,
+  isIdentityMisconfigured,
+} from "./config";
 import { AppError } from "./errors";
 import {
   stateBackend,
@@ -37,7 +47,17 @@ export interface AccountPatch {
 }
 
 function activeSecret(): string {
-  if (config.identitySecret.trim()) return config.identitySecret;
+  const secret = config.identitySecret.trim();
+  if (secret) {
+    if (config.isProduction && secret.length < config.minIdentitySecretLength) {
+      throw new AppError(
+        "CONFIG_ERROR",
+        `IDENTITY_SECRET must be at least ${config.minIdentitySecretLength} characters.`,
+        503,
+      );
+    }
+    return secret;
+  }
   if (config.isProduction || config.identityRequired) {
     throw new AppError(
       "CONFIG_ERROR",
@@ -52,15 +72,34 @@ function hashApiKey(key: string): string {
   return createHmac("sha256", activeSecret()).update(key).digest("hex");
 }
 
+/** Constant-time comparison over fixed-length digests, with no length leak. */
 function safeEqual(left: string, right: string): boolean {
-  const a = Buffer.from(left);
-  const b = Buffer.from(right);
-  return a.length === b.length && timingSafeEqual(a, b);
+  const a = createHash("sha256").update(left).digest();
+  const b = createHash("sha256").update(right).digest();
+  return timingSafeEqual(a, b);
 }
 
 function publicAccount(account: StoredAccount): PublicAccount {
   const { keyHash: _keyHash, ...rest } = account;
   return rest;
+}
+
+function bootstrapAdminIdentity(): IdentityContext {
+  if (config.isProduction && isAdminKeyMisconfigured()) {
+    throw new AppError(
+      "CONFIG_ERROR",
+      `ADMIN_API_KEY must be at least ${config.minAdminKeyLength} characters.`,
+      503,
+    );
+  }
+  return { accountId: "bootstrap-admin", plan: "enterprise", role: "admin" };
+}
+
+/** Bootstrap admin auth is accepted even when API keys are otherwise required. */
+function hasBootstrapAdminKey(request: NextRequest): boolean {
+  const expected = config.adminApiKey.trim();
+  const provided = request.headers.get("x-admin-key")?.trim() ?? "";
+  return Boolean(expected && provided && safeEqual(provided, expected));
 }
 
 function cleanName(value: unknown): string {
@@ -131,6 +170,13 @@ export function listAccounts(): PublicAccount[] {
   );
 }
 
+export function getAccount(id: string): PublicAccount | null {
+  return stateBackend().read((document) => {
+    const account = document.accounts[id];
+    return account ? publicAccount(account) : null;
+  });
+}
+
 export function updateAccount(id: string, patch: AccountPatch): PublicAccount {
   return stateBackend().write((document) => {
     const account = document.accounts[id];
@@ -147,6 +193,8 @@ export function updateAccount(id: string, patch: AccountPatch): PublicAccount {
 
 /** Resolves an API key from the Authorization or x-api-key header. */
 export function identityFromRequest(request: NextRequest): IdentityContext | null {
+  if (hasBootstrapAdminKey(request)) return bootstrapAdminIdentity();
+
   const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
   const raw = bearer ?? request.headers.get("x-api-key") ?? "";
   if (!raw.trim()) {
@@ -190,14 +238,6 @@ export function identityFromRequest(request: NextRequest): IdentityContext | nul
  * admin role. The bootstrap key is never stored and is checked in constant time.
  */
 export function requireAdmin(request: NextRequest): IdentityContext {
-  const adminKey = request.headers.get("x-admin-key") ?? "";
-  if (config.adminApiKey && safeEqual(adminKey, config.adminApiKey)) {
-    return {
-      accountId: "bootstrap-admin",
-      plan: "enterprise",
-      role: "admin",
-    };
-  }
   const identity = identityFromRequest(request);
   if (!identity || identity.role !== "admin") {
     throw new AppError("ADMIN_REQUIRED", "Administrator access is required.", 403);

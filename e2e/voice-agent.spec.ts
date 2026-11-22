@@ -343,3 +343,51 @@ test("reports a barge-in from the live turn to telemetry", async ({ page }) => {
   await page.locator("main").getByRole("button", { name: "End live" }).click();
   await expect.poll(() => live.usageCount).toBe(1);
 });
+
+test("renders admin accounts, usage, and billing", async ({ page }) => {
+  await page.route("**/api/admin/accounts", (route) =>
+    fulfillJson(route, {
+      accounts: [
+        {
+          id: "acct-1",
+          name: "Ada Lovelace",
+          email: "ada@example.com",
+          plan: "pro",
+          role: "user",
+          status: "active",
+          createdAt: "2026-11-22T00:00:00.000Z",
+        },
+      ],
+    }),
+  );
+  await page.route("**/api/admin/usage", (route) =>
+    fulfillJson(route, {
+      rows: [],
+      totals: {
+        requests: 12,
+        audioSeconds: 30,
+        outputTokens: 400,
+        costMicros: 40_000,
+      },
+    }),
+  );
+  await page.route("**/api/admin/billing", (route) =>
+    fulfillJson(route, {
+      lines: [],
+      totals: {
+        baseMicros: 2_900_000,
+        requestMicros: 24_000,
+        usageMicros: 16_000,
+        totalMicros: 2_940_000,
+      },
+    }),
+  );
+
+  await page.goto("/admin");
+  await page.getByPlaceholder("x-admin-key").fill("test-admin-key");
+  await page.getByRole("button", { name: "Load dashboard" }).click();
+
+  await expect(page.getByText("Ada Lovelace")).toBeVisible();
+  await expect(page.getByText("$2.94")).toBeVisible();
+  await expect(page.getByText("12", { exact: true }).first()).toBeVisible();
+});

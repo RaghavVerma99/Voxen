@@ -13,6 +13,7 @@ Voxen is a browser-based **AI voice agent** in one deployable Next.js app. Speak
 - **Durable narrow workflow.** Appointment scheduling with explicit confirmation, conflict detection, cancellation, human handoff, deterministic post-call summary, and tokenized shareable transcripts.
 - **TTS failover.** Realtime narrator first, legacy Speech API second; the chain is reported by `/api/ready`.
 - **Operational visibility.** Per-turn traces, stage percentiles, guarded `/api/metrics`, and deterministic offline/live eval harnesses with regression gates.
+- **Accounts and metering.** Hashed API keys, per-plan daily quotas, Realtime audio/token metering, and admin usage/billing views.
 - **Fail-closed controls.** Production access gate, rate limits, daily budget, byte caps, session serialization, CSP nonce, and hashed session ids.
 
 ---
@@ -214,6 +215,20 @@ Next.js loads `.env.local` for `dev`, `build`, and `start`. On a host, set the s
 | `TURN_TIMEOUT_MS` | `90000` | Hard cap for one streamed turn. |
 | `SSE_HEARTBEAT_MS` | `15000` | Keep-alive cadence. |
 
+### Identity and billing
+
+| Variable | Default | Notes |
+| --- | --- | --- |
+| `IDENTITY_SECRET` | — | HMAC secret for API-key hashes. Required when identity mode is enabled. |
+| `MIN_IDENTITY_SECRET_LENGTH` | `16` | Production refuses a shorter signing secret. |
+| `IDENTITY_REQUIRED` | `false` | Set `true` to reject requests without an API key. |
+| `ADMIN_API_KEY` | — | Bootstrap admin key for `/admin` and `/api/admin/*`; never stored. Also works when `IDENTITY_REQUIRED=true`. |
+| `MIN_ADMIN_KEY_LENGTH` | `16` | Production refuses a shorter bootstrap admin key. |
+
+Identity mode is opt-in so existing access-code deployments keep working. Once accounts are provisioned, set `IDENTITY_REQUIRED=true` and `IDENTITY_SECRET` to a long random value. The access-code gate still applies to every route; identities add per-account rate limits, quotas, and usage attribution. API keys are `vk_…` bearer tokens, returned once at creation and stored only as HMAC hashes. A disabled key is rejected immediately.
+
+Plans are `free` (50 requests/day, no meter), `pro` (1,000/day), and `enterprise` (20,000/day). Meter rates in `lib/billing.ts` are illustrative micro-dollar values; replace them with your provider cost table before charging customers. Daily quota rows and Realtime audio/token usage live in the selected state backend; session usage and the account meter are recorded in one atomic write. `STATE_BACKEND=file` or a future shared adapter is required for consistent caps across instances.
+
 ### Shared state
 
 | Variable | Default | Notes |
@@ -328,6 +343,19 @@ Traces are also emitted as structured `turn.trace` log events with milestones `t
 
 The summary is computed locally from committed history and persisted workflow state—no extra model call, so it is instant, cheap, and reproducible for evals. Booking requires a one-time `confirmation_token` returned by `prepare_appointment`: only its hash is persisted, it expires after `CONFIRMATION_TTL_MS`, and a successful booking consumes it. Appointments record the source transport, creator, confirmation time, and cancellation actor.
 
+### Accounts and admin
+
+| Route | Notes |
+| --- | --- |
+| `GET /api/account` | Requires an API key. Returns the account, daily quota, and metered usage. |
+| `GET /api/admin/accounts` | Lists accounts without key hashes. Requires `x-admin-key` or an admin-role account. |
+| `POST /api/admin/accounts` | `{ name, email?, plan?, role? }`. Returns the account and its one-time `api_key`. |
+| `PATCH /api/admin/accounts` | `{ id, plan?, status?, role? }`. Updates plan, status, or role. |
+| `GET /api/admin/usage` | Usage rows and totals by account and UTC day. |
+| `GET /api/admin/billing` | Invoice-style plan base, request meter, Realtime meter, and totals. |
+
+The `/admin` page is a small operator UI for the same routes. It keeps the admin key in `sessionStorage` only, shows generated API keys once, and never displays key hashes.
+
 ### Realtime
 
 | Route | Notes |
@@ -359,14 +387,15 @@ Failures return `{ "detail": { "error_code", "message", "request_id" } }`.
 
 | HTTP | Codes |
 | --- | --- |
-| 400 | `INVALID_BODY`, `EMPTY_MESSAGE`, `INVALID_SESSION`, `MISSING_SESSION`, `EMPTY_AUDIO`, `INVALID_AUDIO_DURATION`, `NOTHING_HEARD` |
-| 401 | `ACCESS_DENIED` |
-| 404 | `NOT_FOUND` |
+| 400 | `INVALID_BODY`, `EMPTY_MESSAGE`, `INVALID_SESSION`, `MISSING_SESSION`, `EMPTY_AUDIO`, `INVALID_AUDIO_DURATION`, `NOTHING_HEARD`, `INVALID_NAME`, `INVALID_PLAN`, `INVALID_ROLE`, `INVALID_STATUS` |
+| 401 | `ACCESS_DENIED`, `AUTH_REQUIRED`, `AUTH_INVALID` |
+| 403 | `ADMIN_REQUIRED` |
+| 404 | `NOT_FOUND`, `ACCOUNT_NOT_FOUND` |
 | 413 | `PAYLOAD_TOO_LARGE`, `MESSAGE_TOO_LONG`, `AUDIO_TOO_LARGE`, `AUDIO_TOO_LONG` |
-| 429 | `RATE_LIMITED`, `BUDGET_EXHAUSTED` |
-| 500 | `CONFIG_ERROR`, `INTERNAL` |
+| 429 | `RATE_LIMITED`, `BUDGET_EXHAUSTED`, `QUOTA_EXHAUSTED` |
+| 500 | `INTERNAL` |
 | 502 | `STT_FAILED`, `LLM_FAILED`, `TTS_FAILED`, `REALTIME_FAILED` |
-| 503 | `CONFIG_ERROR` (production access gate missing/short, or Realtime disabled) |
+| 503 | `CONFIG_ERROR` (production access gate or identity secret missing/short, or Realtime disabled) |
 
 An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTTP status. In production, 5xx messages are replaced with a generic string.
 
@@ -375,8 +404,10 @@ An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTT
 ## Security and cost controls
 
 - `OPENAI_API_KEY` is server-only. Realtime browsers receive only a short-lived client secret.
-- Guard order is **rate limit → production access gate → access code → daily budget**. Production fails closed before paid work.
-- Access-code attempts are rate-limited and compared in constant time.
+- Guard order is **rate limit → identity → production access gate → access code → daily budget/quota**. Production fails closed before paid work.
+- Access-code attempts are rate-limited and compared in constant time. API keys are HMAC-hashed, format-checked, looked up in constant time, and rejected immediately when disabled.
+- Authenticated requests are rate-limited by account id; anonymous requests use the validated client address. Quota and global budget reservations are atomic.
+- Admin routes require the bootstrap `ADMIN_API_KEY` or an admin-role account; the bootstrap key is never stored, is compared as a hash in constant time, and remains valid when identity mode is required.
 - Failed turns refund their budget reservation; client aborts intentionally keep it.
 - Body bytes are capped before JSON/multipart parsing; audio has required duration plus size checks.
 - Turns are serialized per session; streams have heartbeats and hard deadlines.
@@ -389,16 +420,16 @@ An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTT
 - Errors expose stable codes and request ids without stack traces.
 - The Docker image runs as a non-root user and checks `/api/ready`.
 
-**Scaling boundary:** with `STATE_BACKEND=memory` all state is per process. Set `STATE_BACKEND=file` with a shared volume to share rate limits, budget, history, Realtime usage, and telemetry across local instances; workflow bookings already use their own atomic file. Use a Redis/Postgres implementation of `StateBackend` before running instances on different machines that must share hard caps.
+**Scaling boundary:** with `STATE_BACKEND=memory` all state is per process. Set `STATE_BACKEND=file` with a shared volume to share rate limits, budget, account keys, quotas, usage, history, Realtime usage, and telemetry across local instances; workflow bookings already use their own atomic file. Use a Redis/Postgres implementation of `StateBackend` before running instances on different machines that must share hard caps or customer metering.
 
 ---
 
 ## Testing and evals
 
 ```bash
-npm run check          # typecheck + 164 unit tests
+npm run check          # typecheck + 185 unit tests
 npm test               # Vitest, no network or API key
-npm run test:e2e       # Playwright browser E2E (7 scenarios)
+npm run test:e2e       # Playwright browser E2E (8 scenarios)
 npm run test:e2e:install # installs the Chromium binary once
 npm run audit          # production dependency audit
 npm run build          # Next.js standalone build
@@ -422,6 +453,8 @@ Unit tests need no API key or network. Coverage includes:
 - Realtime tool execution, deferred turn commits, session reservation release, and browser data-channel behavior
 - shared-state contract for memory/file backends, cross-instance visibility, fail-closed corrupt state, and module integration
 - opt-in live eval traces: header label sanitization, text/session redaction, file bounds, and trace-to-dataset conversion
+- API account hashing, disabled-key rejection, admin authorization, quota enforcement/refunds, and Realtime metering
+- admin route contracts for account provisioning, updates, usage, and billing reports
 
 Playwright mocks the OpenAI/app routes and runs the real browser client. `playwright.config.ts` starts a dev server on port 3100 with a placeholder key, Realtime flagged on, and access codes disabled. The E2E suite covers:
 
@@ -432,6 +465,7 @@ Playwright mocks the OpenAI/app routes and runs the real browser client. `playwr
 - summary share links with expiry plus owner-only revocation
 - live function calls and final-only Realtime turn commits
 - barge-in telemetry from a live turn
+- admin dashboard rendering accounts, usage totals, and billing totals
 
 `npm run eval` reads `evals/dataset.json` and scores recorded attempts across `timing`, `recovery`, and `grounded` dimensions. It is deterministic and offline; the bundled dataset currently reports **pass@1=55%, pass@5=100%**. Add your own cases by appending `{ testCase, attempts }` entries.
 
@@ -501,6 +535,7 @@ app/
   components/
     VoiceAgent.tsx                client state machine
     AccessGate.tsx                optional preview gate
+    AdminDashboard.tsx            operator accounts/usage UI
     Icons.tsx
     voice-agent/
       stream.ts                   SSE parser + API errors
@@ -508,10 +543,12 @@ app/
       useRecorder.ts              push-to-talk recorder
       useAudioQueue.ts            ordered playback
       Messages.tsx                thread rendering
+  admin/page.tsx                  guarded operations page
   globals.css / layout.tsx / page.tsx / error.tsx / not-found.tsx
 lib/
   ai.ts openai-client.ts tts.ts realtime-tts.ts streaming.ts
   telemetry.ts evals.ts eval-gate.ts eval-trace.ts
+  identity.ts billing.ts
   workflow-store.ts workflow-tools.ts workflow-summary.ts
   realtime-budget.ts realtime-events.ts csp.ts config.ts
   guard.ts ratelimit.ts conversation.ts session-lock.ts
@@ -523,7 +560,7 @@ evals/thresholds.json             explicit CI floors
 evals/baseline.json               committed regression baseline
 scripts/evals.mts                 eval runner with gate and live-trace modes
 scripts/start.mjs                 standalone launcher
-tests/                            19 test files, 164 unit tests
+tests/                            22 test files, 185 unit tests
 e2e/                              Playwright browser scenarios
 playwright.config.ts              E2E web server + browser config
 Dockerfile next.config.mjs vitest.config.mts
@@ -544,7 +581,7 @@ Dockerfile next.config.mjs vitest.config.mts
 ## Roadmap
 
 1. **Remote shared state** — Redis/Postgres implementations of `StateBackend` and a shared workflow store for multi-machine fleets.
-2. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
+2. **Payment provider integration** — Stripe checkout, webhooks, and invoice finalization on top of the existing usage meter.
 3. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
 4. **Realtime hardening** — richer browser/device matrix and measured latency targets.
 5. **Eval breadth** — more labeled live scenarios and provider-specific baselines.

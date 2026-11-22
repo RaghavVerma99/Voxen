@@ -1,4 +1,4 @@
-import { recordRealtimeMetering } from "./billing";
+import { meterRealtimeUsage } from "./billing";
 import { config } from "./config";
 import { AppError } from "./errors";
 import type { IdentityContext } from "./identity";
@@ -104,15 +104,12 @@ export function recordRealtimeUsage(
     record.audioSeconds = nextAudio;
     record.outputTokens = nextTokens;
     record.updatedAt = new Date().toISOString();
+    if (identity) {
+      meterRealtimeUsage(document, identity, { audioSeconds, outputTokens });
+    }
     return { ...record };
   });
 
-  if (identity) {
-    recordRealtimeMetering(identity, {
-      audioSeconds: typeof audioSeconds === "number" ? audioSeconds : 0,
-      outputTokens: typeof outputTokens === "number" ? outputTokens : 0,
-    });
-  }
   return usage;
 }
 

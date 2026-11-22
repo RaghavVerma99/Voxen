@@ -11,6 +11,7 @@ import {
 } from "@/lib/billing";
 import { config } from "@/lib/config";
 import { createAccount, type IdentityContext } from "@/lib/identity";
+import { recordRealtimeUsage } from "@/lib/realtime-budget";
 import {
   createMemoryStateBackend,
   stateBackend,
@@ -90,6 +91,21 @@ describe("per-account quotas and metering", () => {
         PLANS.enterprise.requestMicros +
         10 * PLANS.enterprise.audioSecondMicros +
         100 * PLANS.enterprise.outputTokenMicros,
+    });
+  });
+
+  it("records session usage and the account meter in one write", () => {
+    const account = identity("pro");
+    recordRealtimeUsage("live-session", { audioSeconds: 4, outputTokens: 25 }, account);
+
+    expect(stateBackend().read((document) => document.realtime["live-session"])).toMatchObject({
+      audioSeconds: 4,
+      outputTokens: 25,
+    });
+    expect(usageSnapshot(account)).toMatchObject({
+      audioSeconds: 4,
+      outputTokens: 25,
+      costMicros: 4 * PLANS.pro.audioSecondMicros + 25 * PLANS.pro.outputTokenMicros,
     });
   });
 
