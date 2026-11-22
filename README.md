@@ -44,16 +44,16 @@ SSE: session → transcript? → delta… → done → workflow? → audio…
 
 When `REALTIME_ENABLED=true`, the UI shows a **Live voice** button. The browser:
 
-1. Calls `/api/realtime/token`; the server mints a short-lived client secret with OpenAI using the standard key, session policy, input transcription, and `server_vad` with `interrupt_response: true`.
+1. Calls `/api/realtime/token`; the server mints a short-lived client secret with OpenAI using the standard key, session policy, input transcription, tool schemas, and `server_vad` with `interrupt_response: true`.
 2. Creates an `RTCPeerConnection`, adds the microphone track and an `oai-events` data channel, and posts the SDP offer directly to `https://api.openai.com/v1/realtime/calls` with the ephemeral secret.
-3. Receives transcripts and text deltas over the data channel while model speech arrives on the media track.
-4. Interrupts naturally by speaking; a manual **Stop** sends `response.cancel` plus `input_audio_buffer.clear`.
-5. Reports final audio seconds and output tokens to `/api/realtime/usage` when the session ends.
-6. Falls back to the standard SSE voice path if any setup step fails.
+3. Receives transcripts, text deltas, audio markers, and function-call events over the data channel while model speech arrives on the media track.
+4. Executes allowed function calls through `/api/realtime/tool`; the server owns workflow state and returns the tool output to the data channel before asking the model to continue.
+5. Interrupts naturally by speaking; a manual **Stop** sends `response.cancel` plus `input_audio_buffer.clear`.
+6. Commits the final live turn through `/api/realtime/turn`, which appends history, refreshes workflow state, and records transport telemetry. Tool-only intermediate responses are not committed.
+7. Reports final audio seconds and output tokens to `/api/realtime/usage` when the session ends, releasing the session reservation.
+8. Falls back to the standard SSE voice path if any setup step fails.
 
-The OpenAI key never leaves the server. The browser only sees the ephemeral secret, and the CSP allows the Realtime origin only when the flag is on.
-
-> Scope note: the persisted scheduling tools are wired into the SSE tool loop. Realtime mode is currently a transport preview with live transcription and barge-in; use the standard path for tool-driven booking.
+The OpenAI key never leaves the server. The browser only sees the ephemeral secret, and the CSP allows the Realtime origin only when the flag is on. SSE remains the production default; Realtime is opt-in because it changes browser, network, and cost requirements.
 
 ---
 
@@ -292,7 +292,7 @@ Example `/api/metrics` shape:
 }
 ```
 
-Traces are also emitted as structured `turn.trace` log events with milestones `transcript`, `first_delta`, `done`, `first_audio`, `complete`; stages `stt`, `llm`, `tts`; a request id; and a hashed session id. Values are in-process and bounded to the last 500 samples per metric.
+Traces are also emitted as structured `turn.trace` log events with milestones `transcript`, `first_delta`, `done`, `first_audio`, `complete`; stages `stt`, `llm`, `tts`; a request id; and a hashed session id. Live turns replay browser-measured markers and add a `transport: "realtime"` field plus `turn.transport.realtime` / `realtime.interrupted` counters. Values are in-process and bounded to the last 500 samples per metric.
 
 ### Workflow and sharing
 
@@ -308,10 +308,12 @@ The summary is computed locally from committed history and persisted workflow st
 
 | Route | Notes |
 | --- | --- |
-| `POST /api/realtime/token` | `{ session_id }`. Guarded; returns `{ value, expires_at?, session_id, model, limits }`. Disabled unless `REALTIME_ENABLED=true`. |
-| `POST /api/realtime/usage` | `{ session_id, audio_seconds, output_tokens }`. Guarded; enforces caps and records final usage. |
+| `POST /api/realtime/token` | `{ session_id }`. Guarded; returns `{ value, expires_at?, session_id, model, limits }`. Includes the active tool schemas. Disabled unless `REALTIME_ENABLED=true`. |
+| `POST /api/realtime/tool` | `{ session_id, call_id, name, arguments }`. Guarded; runs only advertised tools with the server-owned session id. Does not consume another AI budget unit. |
+| `POST /api/realtime/turn` | `{ session_id, user_text, assistant_text, interrupted?, elapsed_ms?, milestones_ms?, stages_ms? }`. Guarded; commits the final live turn and returns history plus workflow state. |
+| `POST /api/realtime/usage` | `{ session_id, audio_seconds, output_tokens }`. Guarded; enforces caps, records final usage, and releases the session reservation. |
 
-A browser error above the cap returns `429 BUDGET_EXHAUSTED`; the UI then falls back to standard voice mode.
+Token setup failures fall back to standard voice mode. Budget errors are surfaced in the conversation; stop the live session to return to standard voice.
 
 ### Streaming events
 
@@ -355,6 +357,7 @@ An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTT
 - Body bytes are capped before JSON/multipart parsing; audio has required duration plus size checks.
 - Turns are serialized per session; streams have heartbeats and hard deadlines.
 - Session ids are bearer tokens: strict validation, header transport, and hashed logging via `redactSessionId()`.
+- Realtime function calls use a server-side tool allowlist and the server-owned session id; only the final response after tool continuations is committed.
 - Share tokens are separate bearer secrets; shared payloads omit the session id.
 - History is TTL-expired and LRU-bounded; telemetry samples and tracked Realtime sessions are bounded too.
 - Documents receive a nonce-based CSP, HSTS in production, and strict frame/origin policies. Realtime origins are added only under the flag.
@@ -368,7 +371,7 @@ An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTT
 ## Testing and evals
 
 ```bash
-npm run check     # typecheck + 121 tests
+npm run check     # typecheck + 136 tests
 npm test          # Vitest, no network or API key
 npm run audit     # production dependency audit
 npm run build     # Next.js standalone build
@@ -386,6 +389,7 @@ Tests need no API key or network. Coverage includes:
 - durable appointment store: atomic writes, conflicts, cancellation, corrupt-store fail-closed
 - scheduling tools, session-scoped workflow state, summaries, and share tokens
 - Realtime token/usage routes, concurrent session caps, CSP policy, and event parsing
+- Realtime tool execution, deferred turn commits, session reservation release, and browser data-channel behavior
 
 `npm run eval` reads `evals/dataset.json` and scores recorded attempts across `timing`, `recovery`, and `grounded` dimensions. It is deterministic and offline; the bundled dataset currently reports **pass@1=55%, pass@5=100%**. Add your own cases by appending `{ testCase, attempts }` entries.
 
@@ -484,11 +488,12 @@ Dockerfile next.config.mjs vitest.config.mts
 
 ## Roadmap
 
-1. **Shared infrastructure** — Redis/Postgres for sessions, rate limits, budgets, and bookings so caps hold across instances.
-2. **Realtime GA** — tool calling in the live data-channel session, richer browser/device matrix, and measured latency targets.
-3. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
+1. **Workflow trust hardening** — one-time confirmation tokens, share-link expiry/revocation, and appointment audit fields.
+2. **Browser E2E** — Playwright coverage for SSE, autoplay recovery, TTS failover, access gate, live tools, barge-in, and sharing.
+3. **Shared infrastructure** — Redis/Postgres for sessions, rate limits, budgets, and bookings so caps hold across instances.
 4. **Stronger evals** — live provider replay, regression gates in CI, and scenario-level scoring.
-5. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
-6. **Horizontal scale** — replace the JSON store and in-process registries without changing the API surface.
+5. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
+6. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
+7. **Realtime hardening** — richer browser/device matrix and measured latency targets.
 
 > First make it work. Then make it fast. Then make it reliable. Then make it scalable.
