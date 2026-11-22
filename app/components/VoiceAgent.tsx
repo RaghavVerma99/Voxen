@@ -54,6 +54,8 @@ interface ShareState {
   headline: string;
   actionItems: string[];
   url: string;
+  token: string;
+  expiresAt: string;
 }
 
 const SESSION_KEY = "voxen.session_id";
@@ -136,6 +138,7 @@ export default function VoiceAgent() {
   const [workflow, setWorkflow] = useState<WorkflowSnapshot | null>(null);
   const [appointments, setAppointments] = useState<AppointmentRecord[]>([]);
   const [share, setShare] = useState<ShareState | null>(null);
+  const [shareBusy, setShareBusy] = useState(false);
 
   const sessionRef = useRef("");
   const counterRef = useRef(0);
@@ -822,6 +825,7 @@ export default function VoiceAgent() {
   }
 
   async function shareTranscript() {
+    setShareBusy(true);
     try {
       const response = await fetch("/api/workflow/summary", {
         method: "POST",
@@ -839,14 +843,47 @@ export default function VoiceAgent() {
       const data = (await response.json()) as {
         summary?: { headline?: string; action_items?: string[] };
         share_url?: string;
+        share_token?: string;
+        share_expires_at?: string;
       };
       setShare({
         headline: data.summary?.headline ?? "Session summary",
         actionItems: data.summary?.action_items ?? [],
         url: data.share_url ?? "",
+        token: data.share_token ?? "",
+        expiresAt: data.share_expires_at ?? "",
       });
     } catch (error) {
       fail(error);
+    } finally {
+      setShareBusy(false);
+    }
+  }
+
+  async function revokeShareLink() {
+    if (!share?.token) return;
+    setShareBusy(true);
+    try {
+      const response = await fetch("/api/workflow/share/revoke", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          ...authHeaders(),
+        },
+        body: JSON.stringify({
+          session_id: sessionRef.current,
+          share_token: share.token,
+        }),
+      });
+      if (!response.ok) {
+        handleUnauthorized(response);
+        throw await errorFromResponse(response);
+      }
+      setShare(null);
+    } catch (error) {
+      fail(error);
+    } finally {
+      setShareBusy(false);
     }
   }
 
@@ -1172,6 +1209,21 @@ export default function VoiceAgent() {
                 <a href={share.url} target="_blank" rel="noreferrer">
                   Open shareable transcript
                 </a>
+                <div className="share-meta">
+                  <span>
+                    {share.expiresAt
+                      ? `Expires ${new Date(share.expiresAt).toLocaleString()}`
+                      : "Limited-time link"}
+                  </span>
+                  <button
+                    type="button"
+                    className="link-button"
+                    onClick={() => void revokeShareLink()}
+                    disabled={shareBusy}
+                  >
+                    Revoke
+                  </button>
+                </div>
               </div>
             ) : null}
             <div className="workflow-actions">
@@ -1197,7 +1249,7 @@ export default function VoiceAgent() {
                 type="button"
                 className="btn"
                 onClick={() => void shareTranscript()}
-                disabled={busy}
+                disabled={busy || shareBusy}
               >
                 Share
               </button>

@@ -820,6 +820,31 @@ button {
   text-decoration: underline;
 }
 
+.share-meta {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.link-button {
+  border: 0;
+  background: none;
+  padding: 0;
+  color: var(--accent-2);
+  cursor: pointer;
+  font: inherit;
+  text-decoration: underline;
+}
+
+.link-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
 /* ---------- Buttons & links ---------- */
 
 .btn {

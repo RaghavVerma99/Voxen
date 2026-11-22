@@ -299,10 +299,11 @@ Traces are also emitted as structured `turn.trace` log events with milestones `t
 | Route | Notes |
 | --- | --- |
 | `GET /api/workflow` | `x-session-id` or `?session_id=`. Returns `enabled`, `workflow`, `appointments`, and aggregate `stats`. |
-| `POST /api/workflow/summary` | `{ session_id }`. Returns deterministic `headline`, `action_items`, `decisions`, `share_token`, and `share_url`. |
-| `GET /api/transcript/{token}` | Read-only shared transcript. The high-entropy token is the bearer secret; the payload omits the session id. |
+| `POST /api/workflow/summary` | `{ session_id }`. Returns deterministic `headline`, `action_items`, `decisions`, `share_token`, `share_url`, and `share_expires_at`. |
+| `POST /api/workflow/share/revoke` | `{ session_id, share_token }`. Revokes a link for its owning session; unknown or foreign tokens return `{ revoked: false }`. |
+| `GET /api/transcript/{token}` | Read-only, expiring shared transcript. The high-entropy token is the bearer secret; the payload omits the session id and includes expiry. |
 
-The summary is computed locally from committed history and persisted workflow state—no extra model call, so it is instant, cheap, and reproducible for evals.
+The summary is computed locally from committed history and persisted workflow state—no extra model call, so it is instant, cheap, and reproducible for evals. Booking requires a one-time `confirmation_token` returned by `prepare_appointment`: only its hash is persisted, it expires after `CONFIRMATION_TTL_MS`, and a successful booking consumes it. Appointments record the source transport, creator, confirmation time, and cancellation actor.
 
 ### Realtime
 
@@ -358,7 +359,8 @@ An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTT
 - Turns are serialized per session; streams have heartbeats and hard deadlines.
 - Session ids are bearer tokens: strict validation, header transport, and hashed logging via `redactSessionId()`.
 - Realtime function calls use a server-side tool allowlist and the server-owned session id; only the final response after tool continuations is committed.
-- Share tokens are separate bearer secrets; shared payloads omit the session id.
+- Share tokens are separate bearer secrets; shared payloads omit the session id, expire after `SHARE_TTL_MS`, and can be revoked by the owning session.
+- Appointment confirmations require a hashed, expiring, single-use token; audit fields record source, creator, confirmation time, and cancellation actor.
 - History is TTL-expired and LRU-bounded; telemetry samples and tracked Realtime sessions are bounded too.
 - Documents receive a nonce-based CSP, HSTS in production, and strict frame/origin policies. Realtime origins are added only under the flag.
 - Errors expose stable codes and request ids without stack traces.
@@ -371,7 +373,7 @@ An open stream reports `TURN_TIMEOUT` in its `error` event rather than as an HTT
 ## Testing and evals
 
 ```bash
-npm run check     # typecheck + 136 tests
+npm run check     # typecheck + 141 tests
 npm test          # Vitest, no network or API key
 npm run audit     # production dependency audit
 npm run build     # Next.js standalone build
@@ -387,7 +389,7 @@ Tests need no API key or network. Coverage includes:
 - telemetry traces, percentiles, and guarded metrics
 - eval scoring, pass@1/pass@5, and dataset parsing
 - durable appointment store: atomic writes, conflicts, cancellation, corrupt-store fail-closed
-- scheduling tools, session-scoped workflow state, summaries, and share tokens
+- scheduling tools, session-scoped workflow state, one-time confirmations, summaries, share expiry, and revocation
 - Realtime token/usage routes, concurrent session caps, CSP policy, and event parsing
 - Realtime tool execution, deferred turn commits, session reservation release, and browser data-channel behavior
 
@@ -488,12 +490,11 @@ Dockerfile next.config.mjs vitest.config.mts
 
 ## Roadmap
 
-1. **Workflow trust hardening** — one-time confirmation tokens, share-link expiry/revocation, and appointment audit fields.
-2. **Browser E2E** — Playwright coverage for SSE, autoplay recovery, TTS failover, access gate, live tools, barge-in, and sharing.
-3. **Shared infrastructure** — Redis/Postgres for sessions, rate limits, budgets, and bookings so caps hold across instances.
-4. **Stronger evals** — live provider replay, regression gates in CI, and scenario-level scoring.
-5. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
-6. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
-7. **Realtime hardening** — richer browser/device matrix and measured latency targets.
+1. **Browser E2E** — Playwright coverage for SSE, autoplay recovery, TTS failover, access gate, live tools, barge-in, and sharing.
+2. **Shared infrastructure** — Redis/Postgres for sessions, rate limits, budgets, and bookings so caps hold across instances.
+3. **Stronger evals** — live provider replay, regression gates in CI, and scenario-level scoring.
+4. **Identity and billing** — real accounts, per-user quotas, and meter-based pricing.
+5. **Workflow depth** — rescheduling, calendar integration, reminders, and support handoff records.
+6. **Realtime hardening** — richer browser/device matrix and measured latency targets.
 
 > First make it work. Then make it fast. Then make it reliable. Then make it scalable.
