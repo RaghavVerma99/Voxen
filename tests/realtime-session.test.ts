@@ -134,7 +134,7 @@ function installBrowserGlobals(): void {
 
 beforeEach(installBrowserGlobals);
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllGlobals();
 });
 

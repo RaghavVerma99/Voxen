@@ -95,7 +95,7 @@ function toolReply(name = "search_web", args = '{"query":"latest news"}') {
   };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   wsState.instances.length = 0;
   config.openaiApiKey = "test-key";

@@ -33,6 +33,8 @@ export interface StreamTurnOptions {
 interface TurnOutcome {
   reply: string;
   audioChain: Promise<void>;
+  /** Releases audio events if the turn ends before `done` is sent. */
+  unlockAudio: () => void;
 }
 
 interface TurnObservations {
@@ -55,8 +57,12 @@ export async function streamTurn(options: StreamTurnOptions): Promise<string> {
     const outcome = await withSessionLock(options.sessionId, () =>
       runTurn(options, observed),
     );
-    await outcome.audioChain;
-    options.trace?.milestone("complete");
+    try {
+      await outcome.audioChain;
+      options.trace?.milestone("complete");
+    } finally {
+      outcome.unlockAudio();
+    }
 
     const snapshot = options.trace?.finish();
     if (snapshot) logEvent("turn.trace", { ...snapshot });
@@ -112,6 +118,12 @@ async function runTurn(
   const chunker = new SentenceChunker();
   let audioIndex = 0;
   let audioChain = Promise.resolve();
+  let unlockAudio = (): void => {};
+  // Audio is synthesized while the model streams, but only emitted after the
+  // committed `done` event so clients always see text/history first.
+  const audioGate = new Promise<void>((resolve) => {
+    unlockAudio = resolve;
+  });
 
   const queueAudio = (text: string): void => {
     if (options.speak === false) return;
@@ -123,6 +135,7 @@ async function runTurn(
       const endTts = options.trace?.stage("tts");
       try {
         const audio = await synthesizeSpeech(chunk, options.signal);
+        await audioGate;
         if (!options.signal.aborted) {
           // Assign the index at send time, after earlier chunks have finished,
           // so a failed sentence cannot leave a gap that stalls playback.
@@ -148,7 +161,7 @@ async function runTurn(
   let reply: string;
   try {
     reply = await streamResponse(
-      buildRequestMessages(options.sessionId, options.userContent),
+      await buildRequestMessages(options.sessionId, options.userContent),
       {
         signal: options.signal,
         onDelta: (delta) => {
@@ -169,13 +182,14 @@ async function runTurn(
   // A cancelled turn is never committed, so client and server agree on what
   // happened even if the user stops generation midway.
   if (!options.signal.aborted) {
-    appendTurn(options.sessionId, options.userContent, reply);
+    await appendTurn(options.sessionId, options.userContent, reply);
     options.send("done", {
       session_id: options.sessionId,
       reply,
-      history: getHistory(options.sessionId),
+      history: await getHistory(options.sessionId),
       spoken: options.speak !== false,
     });
+    unlockAudio();
     options.trace?.milestone("done");
 
     if (config.workflowEnabled) {
@@ -195,7 +209,7 @@ async function runTurn(
     }
   }
 
-  return { reply, audioChain };
+  return { reply, audioChain, unlockAudio };
 }
 
 function abortError(): Error {

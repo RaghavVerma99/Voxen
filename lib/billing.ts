@@ -92,9 +92,12 @@ function quotaError(plan: Plan): AppError {
  * authenticated, the account's daily quota. Nothing is charged for malformed
  * requests because callers invoke this after validation.
  */
-export function consumeRequestBudget(route: string, identity?: IdentityContext): void {
+export async function consumeRequestBudget(
+  route: string,
+  identity?: IdentityContext,
+): Promise<void> {
   const date = utcDate();
-  stateBackend().write((document) => {
+  await stateBackend().write((document) => {
     ensureGlobalBudget(document, date);
     const plan = identity ? PLANS[identity.plan] : undefined;
     const usage = identity ? getUsage(document, identity.accountId, date) : undefined;
@@ -121,12 +124,12 @@ export function consumeRequestBudget(route: string, identity?: IdentityContext):
 }
 
 /** Returns a failed reservation to both counters. */
-export function releaseRequestBudget(
+export async function releaseRequestBudget(
   route: string,
   identity?: IdentityContext,
-): boolean {
+): Promise<boolean> {
   const date = utcDate();
-  const refunded = stateBackend().write((document) => {
+  const refunded = await stateBackend().write((document) => {
     ensureGlobalBudget(document, date);
     if (document.budget.used <= 0) return false;
     const plan = identity ? PLANS[identity.plan] : undefined;
@@ -165,14 +168,14 @@ export function meterRealtimeUsage(
 }
 
 /** Adds provider-reported Realtime usage to the account's meter. */
-export function recordRealtimeMetering(
+export async function recordRealtimeMetering(
   identity: IdentityContext,
   input: { audioSeconds?: number; outputTokens?: number },
-): void {
-  stateBackend().write((document) => meterRealtimeUsage(document, identity, input));
+): Promise<void> {
+  await stateBackend().write((document) => meterRealtimeUsage(document, identity, input));
 }
 
-export function usageSnapshot(identity: IdentityContext): StoredUsage {
+export async function usageSnapshot(identity: IdentityContext): Promise<StoredUsage> {
   const date = utcDate();
   return stateBackend().read((document) => {
     const key = usageKey(identity.accountId, date);
@@ -182,14 +185,14 @@ export function usageSnapshot(identity: IdentityContext): StoredUsage {
   });
 }
 
-export function quotaSnapshot(identity: IdentityContext): {
+export async function quotaSnapshot(identity: IdentityContext): Promise<{
   date: string;
   used: number;
   limit: number;
   remaining: number;
-} {
+}> {
   const plan = PLANS[identity.plan];
-  const usage = usageSnapshot(identity);
+  const usage = await usageSnapshot(identity);
   return {
     date: usage.date,
     used: usage.requests,
@@ -209,7 +212,7 @@ export interface UsageReport {
 }
 
 /** All account usage rows plus totals, newest first. */
-export function usageReport(): UsageReport {
+export async function usageReport(): Promise<UsageReport> {
   return stateBackend().read((document) => {
     const rows = Object.values(document.usage)
       .map((row) => ({ ...row }))
@@ -246,7 +249,7 @@ export interface BillingLine {
 }
 
 /** Aggregates all stored usage rows into an invoice-style view. */
-export function billingReport(): BillingLine[] {
+export async function billingReport(): Promise<BillingLine[]> {
   return stateBackend().read((document) => {
     const accounts = Object.values(document.accounts);
     const byAccount = new Map<string, BillingLine>();

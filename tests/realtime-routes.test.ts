@@ -30,9 +30,9 @@ async function bodyOf(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   counter = 0;
-  resetRealtimeBudget();
+  await resetRealtimeBudget();
   config.openaiApiKey = "test-key";
   config.accessCode = "";
   config.rateLimitRequests = 10_000;
@@ -46,7 +46,7 @@ beforeEach(() => {
   config.workflowEnabled = true;
 });
 
-afterEach(() => {
+afterEach(async () => {
   vi.unstubAllGlobals();
 });
 
@@ -113,7 +113,7 @@ describe("realtime token route", () => {
       type: "server_vad",
       interrupt_response: true,
     });
-    expect(realtimeUsageSnapshot(id)?.sessions).toBe(1);
+    expect((await realtimeUsageSnapshot(id))?.sessions).toBe(1);
   });
 
   it("normalizes a provider epoch expiry and honors the workflow flag", async () => {
@@ -141,7 +141,7 @@ describe("realtime token route", () => {
   });
 
   it("refunds the reservation when the provider rejects the request", async () => {
-    const usedBefore = budgetSnapshot().used;
+    const usedBefore = (await budgetSnapshot()).used;
     vi.stubGlobal(
       "fetch",
       vi.fn().mockResolvedValue(new Response("unauthorized", { status: 401 })),
@@ -156,8 +156,8 @@ describe("realtime token route", () => {
     expect(await bodyOf(response)).toMatchObject({
       detail: { error_code: "REALTIME_FAILED" },
     });
-    expect(realtimeUsageSnapshot(id)).toBeNull();
-    expect(budgetSnapshot().used).toBe(usedBefore);
+    expect(await realtimeUsageSnapshot(id)).toBeNull();
+    expect((await budgetSnapshot()).used).toBe(usedBefore);
   });
 
   it("enforces a per-session concurrent session cap", async () => {
@@ -177,15 +177,15 @@ describe("realtime token route", () => {
       request("/api/realtime/token", { session_id: id }),
     );
     expect(second.status).toBe(429);
-    expect(realtimeUsageSnapshot(id)?.sessions).toBe(1);
+    expect((await realtimeUsageSnapshot(id))?.sessions).toBe(1);
   });
 });
 
 describe("realtime usage route", () => {
   it("records audio and token usage and releases the session reservation", async () => {
     const id = session();
-    startRealtimeSession(id);
-    expect(realtimeUsageSnapshot(id)?.sessions).toBe(1);
+    await startRealtimeSession(id);
+    expect((await realtimeUsageSnapshot(id))?.sessions).toBe(1);
 
     const response = await postUsage(
       request("/api/realtime/usage", {
@@ -199,7 +199,7 @@ describe("realtime usage route", () => {
     expect(await bodyOf(response)).toMatchObject({
       usage: { audioSeconds: 42.5, outputTokens: 300 },
     });
-    expect(realtimeUsageSnapshot(id)?.sessions).toBe(0);
+    expect((await realtimeUsageSnapshot(id))?.sessions).toBe(0);
   });
 
   it("rejects usage beyond the audio-minute cap", async () => {

@@ -137,10 +137,10 @@ function parseStatus(value: unknown, fallback: AccountStatus): AccountStatus {
 }
 
 /** Creates an account and returns its API key exactly once. */
-export function createAccount(input: NewAccountInput): {
+export async function createAccount(input: NewAccountInput): Promise<{
   account: PublicAccount;
   apiKey: string;
-} {
+}> {
   const name = cleanName(input.name);
   if (!name) {
     throw new AppError("INVALID_NAME", "Account name is required.", 400);
@@ -158,26 +158,29 @@ export function createAccount(input: NewAccountInput): {
     createdAt: new Date().toISOString(),
   };
 
-  stateBackend().write((document) => {
+  await stateBackend().write((document) => {
     document.accounts[account.id] = account;
   });
   return { account: publicAccount(account), apiKey };
 }
 
-export function listAccounts(): PublicAccount[] {
+export async function listAccounts(): Promise<PublicAccount[]> {
   return stateBackend().read((document) =>
     Object.values(document.accounts).map(publicAccount),
   );
 }
 
-export function getAccount(id: string): PublicAccount | null {
+export async function getAccount(id: string): Promise<PublicAccount | null> {
   return stateBackend().read((document) => {
     const account = document.accounts[id];
     return account ? publicAccount(account) : null;
   });
 }
 
-export function updateAccount(id: string, patch: AccountPatch): PublicAccount {
+export async function updateAccount(
+  id: string,
+  patch: AccountPatch,
+): Promise<PublicAccount> {
   return stateBackend().write((document) => {
     const account = document.accounts[id];
     if (!account) {
@@ -192,7 +195,9 @@ export function updateAccount(id: string, patch: AccountPatch): PublicAccount {
 }
 
 /** Resolves an API key from the Authorization or x-api-key header. */
-export function identityFromRequest(request: NextRequest): IdentityContext | null {
+export async function identityFromRequest(
+  request: NextRequest,
+): Promise<IdentityContext | null> {
   if (hasBootstrapAdminKey(request)) return bootstrapAdminIdentity();
 
   const bearer = request.headers.get("authorization")?.match(/^Bearer\s+(.+)$/i)?.[1];
@@ -237,8 +242,8 @@ export function identityFromRequest(request: NextRequest): IdentityContext | nul
  * Admin access accepts the bootstrap ADMIN_API_KEY or an account with the
  * admin role. The bootstrap key is never stored and is checked in constant time.
  */
-export function requireAdmin(request: NextRequest): IdentityContext {
-  const identity = identityFromRequest(request);
+export async function requireAdmin(request: NextRequest): Promise<IdentityContext> {
+  const identity = await identityFromRequest(request);
   if (!identity || identity.role !== "admin") {
     throw new AppError("ADMIN_REQUIRED", "Administrator access is required.", 403);
   }

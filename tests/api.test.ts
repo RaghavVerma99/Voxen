@@ -99,7 +99,7 @@ function detailOf(body: Record<string, unknown>): { error_code?: string } {
   return (body.detail ?? {}) as { error_code?: string };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   config.accessCode = "";
   config.rateLimitRequests = 1_000;
@@ -287,7 +287,7 @@ describe("chat", () => {
 
   it("does not persist an orphan user turn when the model fails", async () => {
     const sessionId = nextSession();
-    const before = budgetSnapshot().used;
+    const before = (await budgetSnapshot()).used;
     mockGenerate.mockRejectedValue(new AppError("LLM_FAILED", "down", 502));
 
     const response = await postChat(
@@ -295,8 +295,8 @@ describe("chat", () => {
     );
 
     expect(response.status).toBe(502);
-    expect(getHistory(sessionId)).toEqual([]);
-    expect(budgetSnapshot().used).toBe(before);
+    expect(await getHistory(sessionId)).toEqual([]);
+    expect((await budgetSnapshot()).used).toBe(before);
   });
 
   it("speaks the reply when asked", async () => {
@@ -451,8 +451,8 @@ describe("reset", () => {
 
     const response = await postReset(resetRequest({ session_id: sessionA }));
     expect(response.status).toBe(200);
-    expect(getHistory(sessionA)).toEqual([]);
-    expect(getHistory(sessionB)).toHaveLength(2);
+    expect(await getHistory(sessionA)).toEqual([]);
+    expect(await getHistory(sessionB)).toHaveLength(2);
   });
 
   it("requires a session id", async () => {
@@ -536,7 +536,7 @@ describe("voice", () => {
   });
 
   it("requires a recording duration", async () => {
-    const before = budgetSnapshot().used;
+    const before = (await budgetSnapshot()).used;
     const response = await postVoice(
       voiceRequest(audioForm({ omitDuration: true })),
     );
@@ -546,26 +546,26 @@ describe("voice", () => {
       "INVALID_AUDIO_DURATION",
     );
     expect(mockTranscribe).not.toHaveBeenCalled();
-    expect(budgetSnapshot().used).toBe(before);
+    expect((await budgetSnapshot()).used).toBe(before);
   });
 
   it("rejects audio with no detected speech", async () => {
-    const before = budgetSnapshot().used;
+    const before = (await budgetSnapshot()).used;
     mockTranscribe.mockResolvedValue("   ");
     const response = await postVoice(voiceRequest(audioForm()));
     expect(response.status).toBe(400);
     expect(detailOf(await bodyOf(response)).error_code).toBe("NOTHING_HEARD");
-    expect(budgetSnapshot().used).toBe(before);
+    expect((await budgetSnapshot()).used).toBe(before);
   });
 
   it("maps STT failures to 502 and releases the budget", async () => {
-    const before = budgetSnapshot().used;
+    const before = (await budgetSnapshot()).used;
     mockTranscribe.mockRejectedValue(
       new AppError("STT_FAILED", "bad key", 502),
     );
     const response = await postVoice(voiceRequest(audioForm()));
     expect(response.status).toBe(502);
     expect(detailOf(await bodyOf(response)).error_code).toBe("STT_FAILED");
-    expect(budgetSnapshot().used).toBe(before);
+    expect((await budgetSnapshot()).used).toBe(before);
   });
 });

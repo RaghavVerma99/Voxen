@@ -26,7 +26,7 @@ beforeAll(async () => {
   contractPath = join(await tempDir(), "contract.json");
 });
 
-afterEach(() => {
+afterEach(async () => {
   useStateBackendForTests(createMemoryStateBackend());
 });
 
@@ -38,9 +38,9 @@ afterAll(async () => {
 
 function contract(name: string, make: () => StateBackend): void {
   describe(`${name} backend contract`, () => {
-    it("round-trips nested state through read and write", () => {
+    it("round-trips nested state through read and write", async () => {
       const backend = make();
-      backend.write((document) => {
+      await backend.write((document) => {
         document.counters["turn.ok"] = 3;
         document.sessions["abc"] = {
           messages: [{ role: "user", content: "hello" }],
@@ -49,15 +49,15 @@ function contract(name: string, make: () => StateBackend): void {
         };
       });
 
-      expect(backend.read((document) => document.counters["turn.ok"])).toBe(3);
+      expect(await backend.read((document) => document.counters["turn.ok"])).toBe(3);
       expect(
-        backend.read((document) => document.sessions["abc"].messages[0].content),
+        await backend.read((document) => document.sessions["abc"].messages[0].content),
       ).toBe("hello");
     });
 
-    it("round-trips account and usage records", () => {
+    it("round-trips account and usage records", async () => {
       const backend = make();
-      backend.write((document) => {
+      await backend.write((document) => {
         document.accounts["acct-1"] = {
           id: "acct-1",
           name: "Ada",
@@ -80,24 +80,24 @@ function contract(name: string, make: () => StateBackend): void {
       });
 
       expect(
-        backend.read((document) => ({
+        await backend.read((document) => ({
           plan: document.accounts["acct-1"].plan,
           requests: document.usage["acct-1:2026-11-22"].requests,
         })),
       ).toEqual({ plan: "pro", requests: 3 });
     });
 
-    it("resets one section without touching the others", () => {
+    it("resets one section without touching the others", async () => {
       const backend = make();
-      backend.write((document) => {
+      await backend.write((document) => {
         document.counters["turn.ok"] = 1;
         document.samples["turn.total"] = [10];
       });
 
-      backend.reset("samples");
+      await backend.reset("samples");
 
-      expect(backend.read((document) => document.counters["turn.ok"])).toBe(1);
-      expect(backend.read((document) => document.samples["turn.total"])).toBeUndefined();
+      expect(await backend.read((document) => document.counters["turn.ok"])).toBe(1);
+      expect(await backend.read((document) => document.samples["turn.total"])).toBeUndefined();
     });
   });
 }
@@ -111,11 +111,11 @@ describe("file backend", () => {
     const first = createFileStateBackend(path);
     const second = createFileStateBackend(path);
 
-    first.write((document) => {
+    await first.write((document) => {
       document.counters["shared"] = 7;
     });
 
-    expect(second.read((document) => document.counters["shared"])).toBe(7);
+    expect(await second.read((document) => document.counters["shared"])).toBe(7);
     expect(JSON.parse(await readFile(path, "utf8"))).toMatchObject({
       counters: { shared: 7 },
     });
@@ -126,7 +126,9 @@ describe("file backend", () => {
     await writeFile(path, "{not json", "utf8");
     const backend = createFileStateBackend(path);
 
-    expect(() => backend.read((document) => document.rate)).toThrow();
+    await expect(
+      backend.read((document) => document.rate),
+    ).rejects.toThrow();
   });
 
   it("backs all stateful modules with the selected adapter", async () => {
@@ -139,20 +141,20 @@ describe("file backend", () => {
     config.rateLimitRequests = 1;
     config.dailyRequestBudget = 1;
     try {
-      expect(rateLimit("shared-key").allowed).toBe(true);
-      expect(rateLimit("shared-key").allowed).toBe(false);
-      expect(consumeDailyBudget()).toBe(true);
-      expect(consumeDailyBudget()).toBe(false);
-      addMessage("shared-session", "user", "hello");
-      expect(getHistory("shared-session")[0].content).toBe("hello");
-      startRealtimeSession("shared-session");
+      expect((await rateLimit("shared-key")).allowed).toBe(true);
+      expect((await rateLimit("shared-key")).allowed).toBe(false);
+      expect(await consumeDailyBudget()).toBe(true);
+      expect(await consumeDailyBudget()).toBe(false);
+      await addMessage("shared-session", "user", "hello");
+      expect((await getHistory("shared-session"))[0].content).toBe("hello");
+      await startRealtimeSession("shared-session");
     } finally {
       config.rateLimitRequests = originalRequests;
       config.dailyRequestBudget = originalBudget;
     }
 
     expect(
-      shared.read((document) => ({
+      await shared.read((document) => ({
         rate: document.rate["shared-key"].count,
         budget: document.budget.used,
         message: document.sessions["shared-session"].messages[1]?.content,

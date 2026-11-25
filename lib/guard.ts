@@ -75,14 +75,14 @@ export interface GuardResult extends RateLimitResult {
  * cannot be brute-forced without a bound. In production, a missing or too-short
  * access code fails closed before any paid work can start.
  */
-export function guardRequest(
+export async function guardRequest(
   request: NextRequest,
   route: string,
-): GuardResult {
+): Promise<GuardResult> {
   let identity: IdentityContext | null = null;
   let identityError: unknown;
   try {
-    identity = identityFromRequest(request);
+    identity = await identityFromRequest(request);
   } catch (err) {
     // Count invalid-key attempts first, then surface the auth error after the
     // rate-limit decision so they cannot bypass the shared bucket.
@@ -90,7 +90,7 @@ export function guardRequest(
   }
 
   const subject = identity ? `account:${identity.accountId}` : clientAddress(request);
-  const result = rateLimit(`${subject}:${route}`);
+  const result = await rateLimit(`${subject}:${route}`);
   const guarded: GuardResult = { ...result, identity };
 
   if (!result.allowed) {
@@ -136,12 +136,12 @@ export function guardRequest(
  * Call this after the request has been validated, so malformed input does not
  * burn budget.
  */
-export function consumeBudget(
+export async function consumeBudget(
   route: string,
   identity?: IdentityContext | null,
-): void {
+): Promise<void> {
   try {
-    consumeRequestBudget(route, identity ?? undefined);
+    await consumeRequestBudget(route, identity ?? undefined);
   } catch (err) {
     if (err instanceof AppError && err.code === "QUOTA_EXHAUSTED") {
       logEvent("request.quota_exhausted", { route });
@@ -153,10 +153,10 @@ export function consumeBudget(
 }
 
 /** Releases a reservation made by consumeBudget when the turn fails. */
-export function releaseBudget(
+export async function releaseBudget(
   route: string,
   identity?: IdentityContext | null,
-): void {
-  if (releaseRequestBudget(route, identity ?? undefined)) return;
+): Promise<void> {
+  if (await releaseRequestBudget(route, identity ?? undefined)) return;
   logEvent("request.budget_released", { route });
 }

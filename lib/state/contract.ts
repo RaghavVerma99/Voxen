@@ -76,11 +76,11 @@ export type StateSection = keyof StateDocument;
 export interface StateBackend {
   readonly name: StateBackendName;
   /** Reads an isolated snapshot or projection without taking a write lock. */
-  read<T>(select: (document: Readonly<StateDocument>) => T): T;
+  read<T>(select: (document: Readonly<StateDocument>) => T): Promise<T>;
   /** Atomically mutates and persists the document. Must not be reentered. */
-  write<T>(mutate: (document: StateDocument) => T): T;
+  write<T>(mutate: (document: StateDocument) => T): Promise<T>;
   /** Clears one section, or the whole document when no section is given. */
-  reset(section?: StateSection): void;
+  reset(section?: StateSection): Promise<void>;
 }
 
 function dictionary<T>(): Record<string, T> {

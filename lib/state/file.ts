@@ -92,7 +92,7 @@ export function createFileStateBackend(
     renameSync(temporary, filePath);
   }
 
-  function write<T>(mutate: (document: StateDocument) => T): T {
+  async function write<T>(mutate: (document: StateDocument) => T): Promise<T> {
     acquire();
     try {
       const document = load();
@@ -106,12 +106,12 @@ export function createFileStateBackend(
 
   return {
     name: "file",
-    read(select) {
+    async read(select) {
       return select(load());
     },
     write,
-    reset(section) {
-      write((document) => {
+    async reset(section) {
+      await write((document) => {
         const fresh = emptyState();
         if (!section) {
           for (const key of Object.keys(document) as Array<keyof StateDocument>) {

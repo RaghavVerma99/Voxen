@@ -28,7 +28,7 @@ export async function POST(request: NextRequest) {
   let trace: TurnTelemetry | undefined;
 
   try {
-    const limits = guardRequest(request, "voice-stream");
+    const limits = await guardRequest(request, "voice-stream");
     ensureAiConfigured();
 
     const formData = await readFormData(
@@ -75,7 +75,7 @@ export async function POST(request: NextRequest) {
       requestId,
       sessionHash: redactSessionId(sessionId),
     });
-    consumeBudget("voice-stream", limits.identity);
+    await consumeBudget("voice-stream", limits.identity);
 
     const endStt = trace.stage("stt");
     let transcript: string;
@@ -84,7 +84,7 @@ export async function POST(request: NextRequest) {
     } catch (err) {
       endStt();
       trace.finish(errorCodeOf(err));
-      releaseBudget("voice-stream", limits.identity);
+      await releaseBudget("voice-stream", limits.identity);
       throw err;
     }
     endStt();
@@ -92,7 +92,7 @@ export async function POST(request: NextRequest) {
 
     if (!transcript) {
       trace.finish("NOTHING_HEARD");
-      releaseBudget("voice-stream", limits.identity);
+      await releaseBudget("voice-stream", limits.identity);
       throw new AppError("NOTHING_HEARD", "No speech detected in audio", 400);
     }
 
@@ -125,7 +125,7 @@ export async function POST(request: NextRequest) {
             replyChars: reply.length,
           });
         } catch (err) {
-          if (!signal.aborted) releaseBudget("voice-stream", limits.identity);
+          if (!signal.aborted) await releaseBudget("voice-stream", limits.identity);
           throw err;
         }
       },

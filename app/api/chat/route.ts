@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
   let promptChars: number | undefined;
 
   try {
-    const limits = guardRequest(request, "chat");
+    const limits = await guardRequest(request, "chat");
     ensureAiConfigured();
 
     const body = await readJson<ChatBody>(request, config.maxChatRequestBytes);
@@ -72,22 +72,22 @@ export async function POST(request: NextRequest) {
     });
     trace.milestone("transcript");
 
-    consumeBudget("chat", limits.identity);
+    await consumeBudget("chat", limits.identity);
     let reply: string;
     const endLlm = trace.stage("llm");
     try {
       reply = await generateResponse(
-        buildRequestMessages(sessionId, message),
+        await buildRequestMessages(sessionId, message),
         { sessionId },
         { onToolCall: (name) => toolCalls.push(name) },
       );
     } catch (err) {
-      releaseBudget("chat", limits.identity);
+      await releaseBudget("chat", limits.identity);
       throw err;
     } finally {
       endLlm();
     }
-    appendTurn(sessionId, message, reply);
+    await appendTurn(sessionId, message, reply);
     trace.milestone("done");
 
     let audio: string | null = null;
@@ -137,7 +137,7 @@ export async function POST(request: NextRequest) {
         session_id: sessionId,
         reply,
         audio,
-        history: getHistory(sessionId),
+        history: await getHistory(sessionId),
       },
       requestId,
       200,

@@ -14,7 +14,7 @@ describe("runtime module mode", () => {
 });
 
 describe("shared state configuration", () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
     vi.resetModules();
   });
@@ -43,7 +43,7 @@ describe("shared state configuration", () => {
 });
 
 describe("eval trace configuration", () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
     vi.resetModules();
   });
@@ -72,7 +72,7 @@ describe("eval trace configuration", () => {
 });
 
 describe("workflow TTL configuration", () => {
-  afterEach(() => {
+  afterEach(async () => {
     vi.unstubAllEnvs();
     vi.resetModules();
   });

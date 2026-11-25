@@ -24,18 +24,18 @@ interface AccountBody {
   status?: unknown;
 }
 
-function authorize(request: NextRequest) {
-  const limits = guardRequest(request, "admin-accounts");
-  requireAdmin(request);
+async function authorize(request: NextRequest) {
+  const limits = await guardRequest(request, "admin-accounts");
+  await requireAdmin(request);
   return limits;
 }
 
 export async function GET(request: NextRequest) {
   const requestId = randomUUID();
   try {
-    const limits = authorize(request);
+    const limits = await authorize(request);
     return jsonOk(
-      { accounts: listAccounts() },
+      { accounts: await listAccounts() },
       requestId,
       200,
       rateLimitHeaders(limits),
@@ -48,9 +48,9 @@ export async function GET(request: NextRequest) {
 export async function POST(request: NextRequest) {
   const requestId = randomUUID();
   try {
-    const limits = authorize(request);
+    const limits = await authorize(request);
     const body = (await readJson<AccountBody>(request, config.maxChatRequestBytes)) ?? {};
-    const created = createAccount({
+    const created = await createAccount({
       name: typeof body.name === "string" ? body.name : "",
       email: typeof body.email === "string" ? body.email : undefined,
       plan: body.plan,
@@ -65,12 +65,12 @@ export async function POST(request: NextRequest) {
 export async function PATCH(request: NextRequest) {
   const requestId = randomUUID();
   try {
-    const limits = authorize(request);
+    const limits = await authorize(request);
     const body = (await readJson<AccountBody>(request, config.maxChatRequestBytes)) ?? {};
     if (typeof body.id !== "string" || !body.id.trim()) {
       throw new AppError("INVALID_BODY", "An account id is required.", 400);
     }
-    const account = updateAccount(body.id, {
+    const account = await updateAccount(body.id, {
       plan: body.plan,
       role: body.role,
       status: body.status,

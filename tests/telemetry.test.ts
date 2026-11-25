@@ -8,8 +8,8 @@ import {
   telemetrySnapshot,
 } from "@/lib/telemetry";
 
-beforeEach(() => {
-  resetTelemetry();
+beforeEach(async () => {
+  await resetTelemetry();
 });
 
 describe("turn telemetry", () => {
@@ -46,10 +46,10 @@ describe("turn telemetry", () => {
     second();
 
     expect(trace.snapshot().stagesMs.tts).toBeGreaterThan(0);
-    expect(telemetrySnapshot().timings["stage.tts"].count).toBe(2);
+    expect((await telemetrySnapshot()).timings["stage.tts"].count).toBe(2);
   });
 
-  it("replays browser-measured live turn markers", () => {
+  it("replays browser-measured live turn markers", async () => {
     const trace = startTurnTrace({
       requestId: "trace-live",
       transport: "realtime",
@@ -68,13 +68,13 @@ describe("turn telemetry", () => {
     });
 
     trace.finish();
-    const metrics = telemetrySnapshot();
+    const metrics = await telemetrySnapshot();
     expect(metrics.timings["turn.total"].p50).toBe(740);
     expect(metrics.timings["stage.stt"].p50).toBe(140);
     expect(metrics.counters["turn.transport.realtime"]).toBe(1);
   });
 
-  it("freezes the total and records outcome counters on finish", () => {
+  it("freezes the total and records outcome counters on finish", async () => {
     const trace = startTurnTrace({ requestId: "trace-3" });
     trace.milestone("complete");
     const finished = trace.finish("LLM_FAILED");
@@ -85,20 +85,20 @@ describe("turn telemetry", () => {
     expect(trace.finish("OTHER").errorCode).toBe("LLM_FAILED");
     expect(trace.snapshot().totalMs).toBe(firstTotal);
 
-    const metrics = telemetrySnapshot();
+    const metrics = await telemetrySnapshot();
     expect(metrics.counters["turn.error.LLM_FAILED"]).toBe(1);
     expect(metrics.timings["turn.total"].count).toBe(1);
   });
 });
 
 describe("metrics registry", () => {
-  it("computes p50, p95 and max from bounded samples", () => {
-    recordTiming("latency", 10);
-    recordTiming("latency", 20);
-    recordTiming("latency", 30);
-    recordTiming("latency", 100);
+  it("computes p50, p95 and max from bounded samples", async () => {
+    await recordTiming("latency", 10);
+    await recordTiming("latency", 20);
+    await recordTiming("latency", 30);
+    await recordTiming("latency", 100);
 
-    expect(telemetrySnapshot().timings.latency).toEqual({
+    expect((await telemetrySnapshot()).timings.latency).toEqual({
       count: 4,
       p50: 20,
       p95: 100,
@@ -106,14 +106,14 @@ describe("metrics registry", () => {
     });
   });
 
-  it("caps retained samples and tracks arbitrary counters", () => {
+  it("caps retained samples and tracks arbitrary counters", async () => {
     for (let index = 0; index < 600; index += 1) {
-      recordTiming("capped", index);
+      await recordTiming("capped", index);
     }
-    incrementCounter("audio.sentences", 3);
-    incrementCounter("audio.sentences", 2);
+    await incrementCounter("audio.sentences", 3);
+    await incrementCounter("audio.sentences", 2);
 
-    expect(telemetrySnapshot().timings.capped.count).toBe(500);
-    expect(telemetrySnapshot().counters["audio.sentences"]).toBe(5);
+    expect((await telemetrySnapshot()).timings.capped.count).toBe(500);
+    expect((await telemetrySnapshot()).counters["audio.sentences"]).toBe(5);
   });
 });

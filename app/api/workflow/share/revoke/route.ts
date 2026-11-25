@@ -24,7 +24,7 @@ export async function POST(request: NextRequest) {
   const requestId = randomUUID();
 
   try {
-    const limits = guardRequest(request, "workflow-share-revoke");
+    const limits = await guardRequest(request, "workflow-share-revoke");
     const body = await readJson<RevokeBody>(request, config.maxChatRequestBytes);
     const sessionId = requireSessionId(body?.session_id);
     const token =

@@ -72,7 +72,7 @@ export async function POST(request: NextRequest) {
   const labels = evalLabelsFromHeaders(request.headers);
 
   try {
-    const limits = guardRequest(request, "realtime-turn");
+    const limits = await guardRequest(request, "realtime-turn");
     if (!config.realtimeEnabled) {
       throw new AppError(
         "CONFIG_ERROR",
@@ -124,8 +124,8 @@ export async function POST(request: NextRequest) {
         replay,
       });
 
-      if (userText) addMessage(sessionId, "user", userText);
-      if (assistantText) addMessage(sessionId, "assistant", assistantText);
+      if (userText) await addMessage(sessionId, "user", userText);
+      if (assistantText) await addMessage(sessionId, "assistant", assistantText);
       if (interrupted) incrementCounter("realtime.interrupted");
 
       trace.milestone("complete");
@@ -152,7 +152,7 @@ export async function POST(request: NextRequest) {
 
       return {
         session_id: sessionId,
-        history: getHistory(sessionId),
+        history: await getHistory(sessionId),
         workflow,
         appointments,
       };

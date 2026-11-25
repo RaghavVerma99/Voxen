@@ -11,9 +11,9 @@ export const dynamic = "force-dynamic";
 export async function GET(request: NextRequest) {
   const requestId = randomUUID();
   try {
-    const limits = guardRequest(request, "admin-billing");
-    requireAdmin(request);
-    const lines = billingReport();
+    const limits = await guardRequest(request, "admin-billing");
+    await requireAdmin(request);
+    const lines = await billingReport();
     return jsonOk(
       {
         lines,

@@ -72,7 +72,7 @@ describe("workflow routes", () => {
 
   it("creates a shareable transcript without exposing the session id", async () => {
     const id = session();
-    appendTurn(id, "Book a slot", "Which day works?");
+    await appendTurn(id, "Book a slot", "Which day works?");
 
     const response = await postSummary(
       new NextRequest("http://localhost/api/workflow/summary", {

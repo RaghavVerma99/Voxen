@@ -62,8 +62,8 @@ function percentile(values: number[], ratio: number): number {
   return round(sorted[index]);
 }
 
-export function recordTiming(name: string, durationMs: number): void {
-  stateBackend().write((document) => {
+export async function recordTiming(name: string, durationMs: number): Promise<void> {
+  await stateBackend().write((document) => {
     const values = document.samples[name] ?? [];
     values.push(Math.max(0, durationMs));
     if (values.length > MAX_SAMPLES) values.shift();
@@ -71,13 +71,13 @@ export function recordTiming(name: string, durationMs: number): void {
   });
 }
 
-export function incrementCounter(name: string, by = 1): void {
-  stateBackend().write((document) => {
+export async function incrementCounter(name: string, by = 1): Promise<void> {
+  await stateBackend().write((document) => {
     document.counters[name] = (document.counters[name] ?? 0) + by;
   });
 }
 
-export function telemetrySnapshot(): MetricsSnapshot {
+export async function telemetrySnapshot(): Promise<MetricsSnapshot> {
   return stateBackend().read((document) => {
     const timings: Record<string, TimingStats> = {};
     for (const [name, values] of Object.entries(document.samples)) {
@@ -99,10 +99,10 @@ export function telemetrySnapshot(): MetricsSnapshot {
   });
 }
 
-export function resetTelemetry(): void {
+export async function resetTelemetry(): Promise<void> {
   const backend = stateBackend();
-  backend.reset("counters");
-  backend.reset("samples");
+  await backend.reset("counters");
+  await backend.reset("samples");
 }
 
 /** Stable error label for trace counters, without importing the HTTP layer. */
@@ -151,7 +151,7 @@ export function startTurnTrace(options: {
     const value = options.replay?.stagesMs?.[name];
     if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
       stagesMs[name] = round(value);
-      recordTiming(`stage.${name}`, value);
+      void recordTiming(`stage.${name}`, value);
     }
   }
   const replayTotal = options.replay?.totalMs;
@@ -185,7 +185,7 @@ export function startTurnTrace(options: {
         ended = true;
         const duration = performance.now() - start;
         stagesMs[name] = round((stagesMs[name] ?? 0) + duration);
-        recordTiming(`stage.${name}`, duration);
+        void recordTiming(`stage.${name}`, duration);
       };
     },
     finish(code) {
@@ -193,10 +193,12 @@ export function startTurnTrace(options: {
       finished = true;
       errorCode = code;
       finalTotal = replayedTotal ?? performance.now() - startedAt;
-      recordTiming("turn.total", finalTotal);
-      incrementCounter(code ? `turn.error.${code}` : "turn.ok");
+      // Telemetry persistence is best-effort; the trace snapshot is returned
+      // synchronously so streaming code never blocks on the state backend.
+      void recordTiming("turn.total", finalTotal);
+      void incrementCounter(code ? `turn.error.${code}` : "turn.ok");
       if (options.transport) {
-        incrementCounter(`turn.transport.${options.transport}`);
+        void incrementCounter(`turn.transport.${options.transport}`);
       }
       return this.snapshot();
     },

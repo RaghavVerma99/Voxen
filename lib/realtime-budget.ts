@@ -30,8 +30,8 @@ function get(document: StateDocument, sessionId: string): StoredRealtimeUsage {
 }
 
 /** Reserves one WebRTC session before an ephemeral token is minted. */
-export function startRealtimeSession(sessionId: string): void {
-  stateBackend().write((document) => {
+export async function startRealtimeSession(sessionId: string): Promise<void> {
+  await stateBackend().write((document) => {
     const record = get(document, sessionId);
     if (record.sessions >= config.realtimeMaxSessions) {
       throw new AppError(
@@ -46,8 +46,8 @@ export function startRealtimeSession(sessionId: string): void {
 }
 
 /** Refunds a reservation when upstream token creation fails. */
-export function releaseRealtimeSession(sessionId: string): void {
-  stateBackend().write((document) => {
+export async function releaseRealtimeSession(sessionId: string): Promise<void> {
+  await stateBackend().write((document) => {
     const record = document.realtime[sessionId];
     if (!record || record.sessions === 0) return;
     record.sessions -= 1;
@@ -71,11 +71,11 @@ function validNumber(value: unknown): value is number {
  * best-effort accounting signal; hard limits are also enforced by the session
  * configuration on the provider side.
  */
-export function recordRealtimeUsage(
+export async function recordRealtimeUsage(
   sessionId: string,
   input: { audioSeconds?: unknown; outputTokens?: unknown },
   identity?: IdentityContext | null,
-): RealtimeUsage {
+): Promise<RealtimeUsage> {
   const audioSeconds = input.audioSeconds ?? 0;
   const outputTokens = input.outputTokens ?? 0;
   if (!validNumber(audioSeconds) || !validNumber(outputTokens)) {
@@ -86,7 +86,7 @@ export function recordRealtimeUsage(
     );
   }
 
-  const usage = stateBackend().write((document) => {
+  const usage = await stateBackend().write((document) => {
     const record = get(document, sessionId);
     const nextAudio = record.audioSeconds + audioSeconds;
     const nextTokens = record.outputTokens + outputTokens;
@@ -113,13 +113,15 @@ export function recordRealtimeUsage(
   return usage;
 }
 
-export function realtimeUsageSnapshot(sessionId: string): RealtimeUsage | null {
+export async function realtimeUsageSnapshot(
+  sessionId: string,
+): Promise<RealtimeUsage | null> {
   return stateBackend().read((document) => {
     const record = document.realtime[sessionId];
     return record ? { ...record } : null;
   });
 }
 
-export function resetRealtimeBudget(): void {
-  stateBackend().reset("realtime");
+export async function resetRealtimeBudget(): Promise<void> {
+  await stateBackend().reset("realtime");
 }

@@ -25,7 +25,7 @@ export async function POST(request: NextRequest) {
   const requestId = randomUUID();
 
   try {
-    const limits = guardRequest(request, "realtime-tool");
+    const limits = await guardRequest(request, "realtime-tool");
     if (!config.realtimeEnabled) {
       throw new AppError(
         "CONFIG_ERROR",

@@ -26,65 +26,65 @@ describe("per-account quotas and metering", () => {
   const originalBudget = config.dailyRequestBudget;
   const originalSecret = config.identitySecret;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     useStateBackendForTests(createMemoryStateBackend());
     config.dailyRequestBudget = 10_000;
     config.identitySecret = "test-identity-secret-1234";
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     config.dailyRequestBudget = originalBudget;
     config.identitySecret = originalSecret;
   });
 
-  it("charges the global budget and the account meter together", () => {
+  it("charges the global budget and the account meter together", async () => {
     const account = identity("pro");
-    consumeRequestBudget("chat", account);
+    await consumeRequestBudget("chat", account);
 
-    expect(stateBackend().read((document) => document.budget.used)).toBe(1);
-    expect(usageSnapshot(account)).toMatchObject({
+    expect(await stateBackend().read((document) => document.budget.used)).toBe(1);
+    expect(await usageSnapshot(account)).toMatchObject({
       requests: 1,
       costMicros: PLANS.pro.requestMicros,
     });
-    expect(quotaSnapshot(account)).toMatchObject({ used: 1, limit: 1_000 });
+    expect(await quotaSnapshot(account)).toMatchObject({ used: 1, limit: 1_000 });
   });
 
-  it("refuses an exhausted account quota before doing paid work", () => {
+  it("refuses an exhausted account quota before doing paid work", async () => {
     const account = identity("free");
     for (let index = 0; index < PLANS.free.dailyRequests; index += 1) {
-      consumeRequestBudget("chat", account);
+      await consumeRequestBudget("chat", account);
     }
 
-    expect(() => consumeRequestBudget("chat", account)).toThrowError(
+    await expect(consumeRequestBudget("chat", account)).rejects.toThrowError(
       expect.objectContaining({ code: "QUOTA_EXHAUSTED", status: 429 }),
     );
-    expect(stateBackend().read((document) => document.budget.used)).toBe(
+    expect(await stateBackend().read((document) => document.budget.used)).toBe(
       PLANS.free.dailyRequests,
     );
   });
 
-  it("refunds both counters when a request fails", () => {
+  it("refunds both counters when a request fails", async () => {
     const account = identity("pro");
-    consumeRequestBudget("chat", account);
-    expect(releaseRequestBudget("chat", account)).toBe(true);
+    await consumeRequestBudget("chat", account);
+    expect(await releaseRequestBudget("chat", account)).toBe(true);
 
-    expect(stateBackend().read((document) => document.budget.used)).toBe(0);
-    expect(usageSnapshot(account).requests).toBe(0);
-    expect(usageSnapshot(account).costMicros).toBe(0);
+    expect(await stateBackend().read((document) => document.budget.used)).toBe(0);
+    expect((await usageSnapshot(account)).requests).toBe(0);
+    expect((await usageSnapshot(account)).costMicros).toBe(0);
   });
 
-  it("does not refund more than was reserved", () => {
+  it("does not refund more than was reserved", async () => {
     const account = identity("free");
-    expect(releaseRequestBudget("chat", account)).toBe(false);
-    expect(stateBackend().read((document) => document.budget.used)).toBe(0);
+    expect(await releaseRequestBudget("chat", account)).toBe(false);
+    expect(await stateBackend().read((document) => document.budget.used)).toBe(0);
   });
 
-  it("meters Realtime audio and output tokens", () => {
+  it("meters Realtime audio and output tokens", async () => {
     const account = identity("enterprise");
-    consumeRequestBudget("realtime-token", account);
-    recordRealtimeMetering(account, { audioSeconds: 10, outputTokens: 100 });
+    await consumeRequestBudget("realtime-token", account);
+    await recordRealtimeMetering(account, { audioSeconds: 10, outputTokens: 100 });
 
-    expect(usageSnapshot(account)).toMatchObject({
+    expect(await usageSnapshot(account)).toMatchObject({
       audioSeconds: 10,
       outputTokens: 100,
       costMicros:
@@ -94,32 +94,32 @@ describe("per-account quotas and metering", () => {
     });
   });
 
-  it("records session usage and the account meter in one write", () => {
+  it("records session usage and the account meter in one write", async () => {
     const account = identity("pro");
-    recordRealtimeUsage("live-session", { audioSeconds: 4, outputTokens: 25 }, account);
+    await recordRealtimeUsage("live-session", { audioSeconds: 4, outputTokens: 25 }, account);
 
-    expect(stateBackend().read((document) => document.realtime["live-session"])).toMatchObject({
+    expect(await stateBackend().read((document) => document.realtime["live-session"])).toMatchObject({
       audioSeconds: 4,
       outputTokens: 25,
     });
-    expect(usageSnapshot(account)).toMatchObject({
+    expect(await usageSnapshot(account)).toMatchObject({
       audioSeconds: 4,
       outputTokens: 25,
       costMicros: 4 * PLANS.pro.audioSecondMicros + 25 * PLANS.pro.outputTokenMicros,
     });
   });
 
-  it("builds an invoice-style report for provisioned accounts", () => {
-    const { account } = createAccount({ name: "Ada", plan: "pro" });
+  it("builds an invoice-style report for provisioned accounts", async () => {
+    const { account } = await createAccount({ name: "Ada", plan: "pro" });
     const context: IdentityContext = {
       accountId: account.id,
       plan: account.plan,
       role: account.role,
     };
-    consumeRequestBudget("chat", context);
-    recordRealtimeMetering(context, { audioSeconds: 5, outputTokens: 20 });
+    await consumeRequestBudget("chat", context);
+    await recordRealtimeMetering(context, { audioSeconds: 5, outputTokens: 20 });
 
-    const [line] = billingReport();
+    const [line] = await billingReport();
     expect(line).toMatchObject({
       accountId: account.id,
       plan: "pro",

@@ -17,7 +17,7 @@ export async function GET(request: NextRequest) {
   const requestId = randomUUID();
 
   try {
-    const limits = guardRequest(request, "workflow");
+    const limits = await guardRequest(request, "workflow");
     const sessionId = resolveSessionId(
       request.headers.get("x-session-id") ??
         request.nextUrl.searchParams.get("session_id"),

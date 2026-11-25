@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
   const startedAt = Date.now();
 
   try {
-    const limits = guardRequest(request, "voice");
+    const limits = await guardRequest(request, "voice");
     ensureAiConfigured();
 
     const formData = await readFormData(
@@ -78,30 +78,30 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    consumeBudget("voice", limits.identity);
+    await consumeBudget("voice", limits.identity);
     let transcript: string;
     try {
       transcript = (await transcribeAudio(audio, request.signal)).trim();
     } catch (err) {
-      releaseBudget("voice", limits.identity);
+      await releaseBudget("voice", limits.identity);
       throw err;
     }
     if (!transcript) {
-      releaseBudget("voice", limits.identity);
+      await releaseBudget("voice", limits.identity);
       throw new AppError("NOTHING_HEARD", "No speech detected in audio", 400);
     }
 
     let reply: string;
     try {
       reply = await generateResponse(
-        buildRequestMessages(sessionId, transcript),
+        await buildRequestMessages(sessionId, transcript),
         { sessionId },
       );
     } catch (err) {
-      releaseBudget("voice", limits.identity);
+      await releaseBudget("voice", limits.identity);
       throw err;
     }
-    appendTurn(sessionId, transcript, reply);
+    await appendTurn(sessionId, transcript, reply);
 
     let audioB64: string | null = null;
     if (speak) {
@@ -130,7 +130,7 @@ export async function POST(request: NextRequest) {
         transcript,
         reply,
         audio: audioB64,
-        history: getHistory(sessionId),
+        history: await getHistory(sessionId),
       },
       requestId,
       200,

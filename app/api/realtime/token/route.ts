@@ -7,6 +7,7 @@ import { AppError } from "@/lib/errors";
 import {
   consumeBudget,
   guardRequest,
+  type GuardResult,
   rateLimitHeaders,
   releaseBudget,
 } from "@/lib/guard";
@@ -37,10 +38,10 @@ export async function POST(request: NextRequest) {
   let sessionId = "";
   let budgetConsumed = false;
   let sessionReserved = false;
-  let identity: ReturnType<typeof guardRequest>["identity"] = null;
+  let identity: GuardResult["identity"] = null;
 
   try {
-    const limits = guardRequest(request, "realtime-token");
+    const limits = await guardRequest(request, "realtime-token");
     identity = limits.identity;
     ensureAiConfigured();
     if (!config.realtimeEnabled) {
@@ -54,9 +55,9 @@ export async function POST(request: NextRequest) {
     const body = await readJson<TokenBody>(request, config.maxChatRequestBytes);
     sessionId = resolveSessionId(body?.session_id);
 
-    consumeBudget("realtime-token", limits.identity);
+    await consumeBudget("realtime-token", limits.identity);
     budgetConsumed = true;
-    startRealtimeSession(sessionId);
+    await startRealtimeSession(sessionId);
     sessionReserved = true;
 
     const response = await fetch(
@@ -142,8 +143,8 @@ export async function POST(request: NextRequest) {
       rateLimitHeaders(limits),
     );
   } catch (err) {
-    if (sessionReserved) releaseRealtimeSession(sessionId);
-    if (budgetConsumed) releaseBudget("realtime-token", identity);
+    if (sessionReserved) await releaseRealtimeSession(sessionId);
+    if (budgetConsumed) await releaseBudget("realtime-token", identity);
     logWarning("realtime.token_failed", {
       requestId,
       message: errorMessage(err),

@@ -15,9 +15,9 @@ export async function GET(request: NextRequest) {
   const requestId = randomUUID();
 
   try {
-    const limits = guardRequest(request, "metrics");
+    const limits = await guardRequest(request, "metrics");
     return jsonOk(
-      { status: "ok", ...telemetrySnapshot() },
+      { status: "ok", ...await telemetrySnapshot() },
       requestId,
       200,
       rateLimitHeaders(limits),

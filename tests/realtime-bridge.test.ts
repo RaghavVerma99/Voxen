@@ -39,7 +39,7 @@ beforeEach(async () => {
   config.accessCode = "";
   config.rateLimitRequests = 10_000;
   config.dailyRequestBudget = 100_000;
-  resetTelemetry();
+  await resetTelemetry();
 });
 
 afterAll(async () => {
@@ -129,7 +129,7 @@ describe("realtime turn route", () => {
     expect(body.workflow).toBeNull();
     expect(body.appointments).toEqual([]);
 
-    const metrics = telemetrySnapshot();
+    const metrics = await telemetrySnapshot();
     expect(metrics.counters["turn.transport.realtime"]).toBe(1);
     expect(metrics.timings["turn.total"].p50).toBe(820);
     expect(metrics.timings["stage.llm"].p50).toBe(360);
@@ -156,7 +156,7 @@ describe("realtime turn route", () => {
 
     expect(response.status).toBe(200);
     expect(body.history).toHaveLength(3);
-    expect(telemetrySnapshot().counters["realtime.interrupted"]).toBe(1);
+    expect((await telemetrySnapshot()).counters["realtime.interrupted"]).toBe(1);
     reset(id);
   });
 

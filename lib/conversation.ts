@@ -72,17 +72,17 @@ function trim(conversation: StoredMessage[]): void {
 }
 
 /** Returns a detached snapshot of a session, creating it if absent. */
-export function getConversation(sessionId: string): ChatMessage[] {
+export async function getConversation(sessionId: string): Promise<ChatMessage[]> {
   return stateBackend().write((document) =>
     copy(touch(document, sessionId, Date.now()).messages),
   );
 }
 
-export function addMessage(
+export async function addMessage(
   sessionId: string,
   role: ChatRole,
   content: string,
-): ChatMessage[] {
+): Promise<ChatMessage[]> {
   return stateBackend().write((document) => {
     const record = touch(document, sessionId, Date.now());
     record.messages.push({ role, content });
@@ -95,12 +95,12 @@ export function addMessage(
  * Commits a completed exchange atomically. Call this only after the LLM
  * succeeds, so a failed turn never leaves an orphaned user message.
  */
-export function appendTurn(
+export async function appendTurn(
   sessionId: string,
   userContent: string,
   assistantContent: string,
-): void {
-  stateBackend().write((document) => {
+): Promise<void> {
+  await stateBackend().write((document) => {
     const record = touch(document, sessionId, Date.now());
     record.messages.push(
       { role: "user", content: userContent },
@@ -110,19 +110,19 @@ export function appendTurn(
   });
 }
 
-export function getHistory(sessionId: string): ChatMessage[] {
-  return getConversation(sessionId)
+export async function getHistory(sessionId: string): Promise<ChatMessage[]> {
+  return (await getConversation(sessionId))
     .filter((message) => message.role !== "system")
     .map((message) => ({ role: message.role, content: message.content }));
 }
 
-export function reset(sessionId: string): void {
-  stateBackend().write((document) => {
+export async function reset(sessionId: string): Promise<void> {
+  await stateBackend().write((document) => {
     delete document.sessions[sessionId];
   });
 }
 
-export function sessionStats(): { sessions: number; messages: number } {
+export async function sessionStats(): Promise<{ sessions: number; messages: number }> {
   return stateBackend().read((document) => {
     let messages = 0;
     for (const record of Object.values(document.sessions)) {
@@ -132,9 +132,9 @@ export function sessionStats(): { sessions: number; messages: number } {
   });
 }
 
-export function buildRequestMessages(
+export async function buildRequestMessages(
   sessionId: string,
   userContent: string,
-): ChatMessage[] {
-  return [...getConversation(sessionId), { role: "user", content: userContent }];
+): Promise<ChatMessage[]> {
+  return [...(await getConversation(sessionId)), { role: "user", content: userContent }];
 }

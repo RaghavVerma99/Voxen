@@ -35,7 +35,7 @@ describe("admin and account routes", () => {
     identityRequired: config.identityRequired,
   };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     useStateBackendForTests(createMemoryStateBackend());
     config.adminApiKey = "test-admin-key-12345678";
     config.accessCode = "";
@@ -43,7 +43,7 @@ describe("admin and account routes", () => {
     config.identityRequired = false;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     Object.assign(config, original);
   });
 

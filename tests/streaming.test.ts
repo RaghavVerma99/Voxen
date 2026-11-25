@@ -86,7 +86,7 @@ function deltaStream(...chunks: string[]) {
   };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   config.accessCode = "";
   config.rateLimitRequests = 1_000;
@@ -135,7 +135,7 @@ describe("chat stream", () => {
       { role: "assistant", content: "Hello world." },
     ]);
     expect(coreEvents[4].data).toMatchObject({ index: 0, audio: "QUJD" });
-    expect(getHistory(sessionId)).toHaveLength(2);
+    expect(await getHistory(sessionId)).toHaveLength(2);
   });
 
   it("suppresses speech when speak is false", async () => {
@@ -159,7 +159,7 @@ describe("chat stream", () => {
 
   it("emits an error event and keeps history clean when the model fails", async () => {
     const sessionId = nextSession();
-    const before = budgetSnapshot().used;
+    const before = (await budgetSnapshot()).used;
     mockStream.mockRejectedValue(
       new AppError("LLM_FAILED", "upstream down", 502),
     );
@@ -175,8 +175,8 @@ describe("chat stream", () => {
       error_code: "LLM_FAILED",
       message: "upstream down",
     });
-    expect(getHistory(sessionId)).toEqual([]);
-    expect(budgetSnapshot().used).toBe(before);
+    expect(await getHistory(sessionId)).toEqual([]);
+    expect((await budgetSnapshot()).used).toBe(before);
   });
 
   it("commits and sends done without waiting for speech", async () => {
@@ -212,7 +212,7 @@ describe("chat stream", () => {
       "done",
       "audio",
     ]);
-    expect(getHistory(sessionId).map((message) => message.content)).toEqual([
+    expect((await getHistory(sessionId)).map((message) => message.content)).toEqual([
       "hi",
       "Hello there.",
     ]);
@@ -282,7 +282,7 @@ describe("voice stream", () => {
   });
 
   it("returns a JSON error when transcription finds no speech", async () => {
-    const before = budgetSnapshot().used;
+    const before = (await budgetSnapshot()).used;
     mockTranscribe.mockResolvedValue("   ");
 
     const response = await postVoiceStream(
@@ -293,11 +293,11 @@ describe("voice stream", () => {
     const body = (await response.json()) as { detail: { error_code: string } };
     expect(body.detail.error_code).toBe("NOTHING_HEARD");
     expect(mockStream).not.toHaveBeenCalled();
-    expect(budgetSnapshot().used).toBe(before);
+    expect((await budgetSnapshot()).used).toBe(before);
   });
 
   it("requires audio_duration before reserving budget or calling STT", async () => {
-    const before = budgetSnapshot().used;
+    const before = (await budgetSnapshot()).used;
     const form = new FormData();
     form.append(
       "audio",
@@ -316,7 +316,7 @@ describe("voice stream", () => {
     const body = (await response.json()) as { detail: { error_code: string } };
     expect(body.detail.error_code).toBe("INVALID_AUDIO_DURATION");
     expect(mockTranscribe).not.toHaveBeenCalled();
-    expect(budgetSnapshot().used).toBe(before);
+    expect((await budgetSnapshot()).used).toBe(before);
   });
 });
 

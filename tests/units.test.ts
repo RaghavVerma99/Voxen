@@ -17,51 +17,51 @@ function uniqueId(prefix: string): string {
 }
 
 describe("conversation", () => {
-  it("isolates history between sessions", () => {
+  it("isolates history between sessions", async () => {
     const a = uniqueId("a");
     const b = uniqueId("b");
 
-    addMessage(a, "user", "hello");
-    addMessage(b, "user", "bye");
+    await addMessage(a, "user", "hello");
+    await addMessage(b, "user", "bye");
     reset(a);
 
-    expect(getHistory(a)).toEqual([]);
-    expect(getHistory(b).map((message) => message.content)).toEqual(["bye"]);
+    expect(await getHistory(a)).toEqual([]);
+    expect((await getHistory(b)).map((message) => message.content)).toEqual(["bye"]);
   });
 
-  it("commits a completed turn atomically", () => {
+  it("commits a completed turn atomically", async () => {
     const sessionId = uniqueId("turn");
-    appendTurn(sessionId, "question", "answer");
+    await appendTurn(sessionId, "question", "answer");
 
-    expect(getHistory(sessionId).map((message) => message.content)).toEqual([
+    expect((await getHistory(sessionId)).map((message) => message.content)).toEqual([
       "question",
       "answer",
     ]);
   });
 
-  it("caps history at maxHistoryMessages plus the system prompt", () => {
+  it("caps history at maxHistoryMessages plus the system prompt", async () => {
     const sessionId = uniqueId("cap");
     const cap = config.maxHistoryMessages;
 
     for (let index = 0; index < cap + 10; index += 1) {
-      addMessage(sessionId, "user", `msg-${index}`);
+      await addMessage(sessionId, "user", `msg-${index}`);
     }
 
-    const history = getHistory(sessionId);
+    const history = await getHistory(sessionId);
     expect(history).toHaveLength(cap);
     expect(history[0].content).toBe("msg-10");
     expect(history[cap - 1].content).toBe(`msg-${cap + 9}`);
   });
 
-  it("never leaves the history starting with an assistant reply", () => {
+  it("never leaves the history starting with an assistant reply", async () => {
     const sessionId = uniqueId("trim");
     const cap = config.maxHistoryMessages;
 
     for (let index = 0; index < cap; index += 1) {
-      appendTurn(sessionId, `q-${index}`, `a-${index}`);
+      await appendTurn(sessionId, `q-${index}`, `a-${index}`);
     }
 
-    const history = getHistory(sessionId);
+    const history = await getHistory(sessionId);
     expect(history.length).toBeGreaterThan(0);
     expect(history[0].role).toBe("user");
   });
@@ -130,16 +130,16 @@ describe("session lock", () => {
 });
 
 describe("rate limiting", () => {
-  it("blocks requests past the configured window limit", () => {
+  it("blocks requests past the configured window limit", async () => {
     const original = config.rateLimitRequests;
     config.rateLimitRequests = 2;
 
     try {
       const key = uniqueId("rl");
-      expect(rateLimit(key).allowed).toBe(true);
-      expect(rateLimit(key).allowed).toBe(true);
+      expect((await rateLimit(key)).allowed).toBe(true);
+      expect((await rateLimit(key)).allowed).toBe(true);
 
-      const blocked = rateLimit(key);
+      const blocked = await rateLimit(key);
       expect(blocked.allowed).toBe(false);
       expect(blocked.remaining).toBe(0);
       expect(blocked.retryAfterSeconds).toBeGreaterThan(0);
@@ -150,7 +150,7 @@ describe("rate limiting", () => {
 });
 
 describe("access guard", () => {
-  it("counts failed access attempts before rejecting them", () => {
+  it("counts failed access attempts before rejecting them", async () => {
     const originalCode = config.accessCode;
     const originalLimit = config.rateLimitRequests;
     const route = uniqueId("guard");
@@ -163,10 +163,10 @@ describe("access guard", () => {
           headers: { "x-access-code": "wrong" },
         });
 
-      expect(() => guardRequest(request(), route)).toThrow(
+      await expect(guardRequest(request(), route)).rejects.toThrow(
         expect.objectContaining({ code: "ACCESS_DENIED" }),
       );
-      expect(() => guardRequest(request(), route)).toThrow(
+      await expect(guardRequest(request(), route)).rejects.toThrow(
         expect.objectContaining({ code: "RATE_LIMITED" }),
       );
     } finally {
@@ -175,7 +175,7 @@ describe("access guard", () => {
     }
   });
 
-  it("includes rate limit headers on access denials", () => {
+  it("includes rate limit headers on access denials", async () => {
     const originalCode = config.accessCode;
     const originalLimit = config.rateLimitRequests;
     config.accessCode = "secret";
@@ -183,7 +183,7 @@ describe("access guard", () => {
 
     try {
       try {
-        guardRequest(
+        await guardRequest(
           new NextRequest("http://localhost/api/chat"),
           uniqueId("guard-headers"),
         );
@@ -200,7 +200,7 @@ describe("access guard", () => {
     }
   });
 
-  it("fails closed in production when the access gate is missing or weak", () => {
+  it("fails closed in production when the access gate is missing or weak", async () => {
     const originalProduction = config.isProduction;
     const originalCode = config.accessCode;
     const originalRequired = config.requireAccessCodeInProduction;
@@ -210,30 +210,26 @@ describe("access guard", () => {
       config.requireAccessCodeInProduction = true;
       config.accessCode = "";
 
-      expect(() =>
-        guardRequest(
+      await expect(guardRequest(
           new NextRequest("http://localhost/api/chat"),
           uniqueId("prod-guard"),
-        ),
-      ).toThrow(expect.objectContaining({ code: "CONFIG_ERROR", status: 503 }));
+        )).rejects.toThrow(expect.objectContaining({ code: "CONFIG_ERROR", status: 503 }));
 
       config.accessCode = "too-short";
-      expect(() =>
-        guardRequest(
+      await expect(guardRequest(
           new NextRequest("http://localhost/api/chat"),
           uniqueId("short-guard"),
-        ),
-      ).toThrow(expect.objectContaining({ code: "CONFIG_ERROR" }));
+        )).rejects.toThrow(expect.objectContaining({ code: "CONFIG_ERROR" }));
 
       config.accessCode = "x".repeat(config.minAccessCodeLength);
-      expect(() =>
+      await expect(
         guardRequest(
           new NextRequest("http://localhost/api/chat", {
             headers: { "x-access-code": config.accessCode },
           }),
           uniqueId("valid-guard"),
         ),
-      ).not.toThrow();
+      ).resolves.toBeDefined();
     } finally {
       config.isProduction = originalProduction;
       config.accessCode = originalCode;

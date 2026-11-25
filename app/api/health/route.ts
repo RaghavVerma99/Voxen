@@ -16,7 +16,7 @@ export async function GET(request: NextRequest) {
     const wantsDetail = request.nextUrl.searchParams.get("detail") === "1";
     const wantsVerify = request.nextUrl.searchParams.get("verify") === "1";
     const guarded = wantsDetail || wantsVerify;
-    const limits = guarded ? guardRequest(request, "health") : undefined;
+    const limits = guarded ? await guardRequest(request, "health") : undefined;
 
     const payload: Record<string, unknown> = {
       status: "ok",
@@ -31,13 +31,13 @@ export async function GET(request: NextRequest) {
 
     // Configuration, budget and session counts are intentionally private.
     if (wantsDetail) {
-      const stats = sessionStats();
+      const stats = await sessionStats();
       payload.checks = {
         ai: isAiConfigured() ? "configured" : "missing",
         search: activeSearchProvider(),
         tts: ttsProviderChain(),
       };
-      payload.budget = budgetSnapshot();
+      payload.budget = await budgetSnapshot();
       payload.sessions = stats.sessions;
       if (config.workflowEnabled) payload.workflow = await workflowStats();
     }

@@ -27,7 +27,7 @@ export async function POST(request: NextRequest) {
   const requestId = randomUUID();
 
   try {
-    const limits = guardRequest(request, "workflow-summary");
+    const limits = await guardRequest(request, "workflow-summary");
     const body = await readJson<SummaryBody>(request, config.maxChatRequestBytes);
     const sessionId = resolveSessionId(body?.session_id);
 
@@ -36,7 +36,7 @@ export async function POST(request: NextRequest) {
       listAppointments(sessionId),
     ]);
     const summary = buildPostCallSummary(
-      getHistory(sessionId),
+      await getHistory(sessionId),
       workflow,
       appointments,
     );

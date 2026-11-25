@@ -9,13 +9,13 @@ export function createMemoryStateBackend(): StateBackend {
 
   return {
     name: "memory",
-    read(select) {
+    async read(select) {
       return select(document);
     },
-    write(mutate) {
+    async write(mutate) {
       return mutate(document);
     },
-    reset(section) {
+    async reset(section) {
       const fresh = emptyState();
       if (!section) {
         document = fresh;

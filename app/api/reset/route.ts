@@ -15,7 +15,7 @@ export async function POST(request: NextRequest) {
   const requestId = randomUUID();
 
   try {
-    const limits = guardRequest(request, "reset");
+    const limits = await guardRequest(request, "reset");
     const body = await readJson<ResetBody>(request, config.maxChatRequestBytes);
     const sessionId = requireSessionId(body?.session_id);
 

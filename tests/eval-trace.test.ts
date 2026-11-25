@@ -26,7 +26,7 @@ describe("eval trace recording", () => {
   };
   let directory: string;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     directory = mkdtempSync(join(tmpdir(), "voxen-eval-"));
     config.evalTraceEnabled = false;
     config.evalTracePath = join(directory, "traces.jsonl");
@@ -35,7 +35,7 @@ describe("eval trace recording", () => {
     config.evalTraceMaxAnswerChars = 40;
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     Object.assign(config, original);
     rmSync(directory, { recursive: true, force: true });
   });

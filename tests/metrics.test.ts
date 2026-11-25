@@ -13,12 +13,12 @@ async function bodyOf(response: Response): Promise<Record<string, unknown>> {
   return (await response.json()) as Record<string, unknown>;
 }
 
-beforeEach(() => {
-  resetTelemetry();
+beforeEach(async () => {
+  await resetTelemetry();
   config.accessCode = "";
   config.rateLimitRequests = 1_000;
-  recordTiming("turn.total", 12);
-  incrementCounter("turn.ok");
+  await recordTiming("turn.total", 12);
+  await incrementCounter("turn.ok");
 });
 
 describe("metrics route", () => {

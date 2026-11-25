@@ -34,7 +34,7 @@ export async function POST(request: NextRequest) {
   let trace: TurnTelemetry | undefined;
 
   try {
-    const limits = guardRequest(request, "chat-stream");
+    const limits = await guardRequest(request, "chat-stream");
     ensureAiConfigured();
 
     const body = await readJson<ChatBody>(request, config.maxChatRequestBytes);
@@ -56,7 +56,7 @@ export async function POST(request: NextRequest) {
       requestId,
       sessionHash: redactSessionId(sessionId),
     });
-    consumeBudget("chat-stream", limits.identity);
+    await consumeBudget("chat-stream", limits.identity);
 
     return sseResponse(request, {
       requestId,
@@ -85,7 +85,7 @@ export async function POST(request: NextRequest) {
             replyChars: reply.length,
           });
         } catch (err) {
-          if (!signal.aborted) releaseBudget("chat-stream", limits.identity);
+          if (!signal.aborted) await releaseBudget("chat-stream", limits.identity);
           throw err;
         }
       },

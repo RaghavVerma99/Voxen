@@ -24,13 +24,13 @@ export async function POST(request: NextRequest) {
   const requestId = randomUUID();
 
   try {
-    const limits = guardRequest(request, "realtime-usage");
+    const limits = await guardRequest(request, "realtime-usage");
     const body =
       (await readJson<UsageBody>(request, config.maxChatRequestBytes)) ?? {};
     const sessionId = resolveSessionId(body?.session_id);
     let usage: RealtimeUsage;
     try {
-      usage = recordRealtimeUsage(
+      usage = await recordRealtimeUsage(
         sessionId,
         {
           audioSeconds: body.audio_seconds,
@@ -41,7 +41,7 @@ export async function POST(request: NextRequest) {
     } finally {
       // The browser reports usage once when the session ends. That ends the
       // reservation too, otherwise three successful sessions exhaust the cap.
-      releaseRealtimeSession(sessionId);
+      await releaseRealtimeSession(sessionId);
     }
 
     return jsonOk(

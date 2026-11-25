@@ -11,10 +11,10 @@ export interface RateLimitResult {
 
 /**
  * Fixed-window limiter backed by the configured state adapter. The default
- * memory backend is per process; `STATE_BACKEND=file` makes this cap shared by
- * every instance using the same state file.
+ * memory backend is per process; `STATE_BACKEND=file` or `redis` makes this
+ * cap shared by every instance using the same store.
  */
-export function rateLimit(key: string): RateLimitResult {
+export async function rateLimit(key: string): Promise<RateLimitResult> {
   return stateBackend().write((document) => {
     const now = Date.now();
     document.rateOperations += 1;
@@ -42,7 +42,7 @@ export function rateLimit(key: string): RateLimitResult {
 }
 
 /** Global daily AI request budget — a blunt spend cap. */
-export function consumeDailyBudget(): boolean {
+export async function consumeDailyBudget(): Promise<boolean> {
   return stateBackend().write((document) => {
     const today = new Date().toISOString().slice(0, 10);
     if (today !== document.budget.date) {
@@ -59,7 +59,7 @@ export function consumeDailyBudget(): boolean {
  * Returns one reserved request to the budget. Call this when a turn fails
  * before producing a useful result (for example, STT rejects the audio).
  */
-export function refundDailyBudget(): boolean {
+export async function refundDailyBudget(): Promise<boolean> {
   return stateBackend().write((document) => {
     if (document.budget.used <= 0) return false;
     document.budget.used -= 1;
@@ -67,7 +67,11 @@ export function refundDailyBudget(): boolean {
   });
 }
 
-export function budgetSnapshot(): { date: string; used: number; limit: number } {
+export async function budgetSnapshot(): Promise<{
+  date: string;
+  used: number;
+  limit: number;
+}> {
   return stateBackend().read((document) => ({
     date: document.budget.date || new Date().toISOString().slice(0, 10),
     used: document.budget.used,
