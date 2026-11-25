@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it } from "vitest";
 import {
   createRedisStateBackend,
   RELEASE_LOCK_SCRIPT,
+  RENEW_LOCK_SCRIPT,
   type RedisStateClient,
   type RedisSetOptions,
 } from "@/lib/state";
@@ -10,6 +11,7 @@ import {
 /** Minimal Redis semantics needed by the state adapter, entirely in memory. */
 class FakeRedisClient implements RedisStateClient {
   readonly values = new Map<string, string>();
+  readonly renewals: string[] = [];
   private readonly expiries = new Map<string, number>();
 
   private expires(key: string): void {
@@ -43,16 +45,25 @@ class FakeRedisClient implements RedisStateClient {
   }
 
   async eval(script: string, keys: string[], args: string[]): Promise<unknown> {
-    if (script !== RELEASE_LOCK_SCRIPT) {
-      throw new Error("Unexpected Lua script.");
-    }
     const key = keys[0];
-    if (key !== undefined && this.raw(key) === args[0]) {
-      this.values.delete(key);
-      this.expiries.delete(key);
-      return 1;
+    if (script === RELEASE_LOCK_SCRIPT) {
+      if (key !== undefined && this.raw(key) === args[0]) {
+        this.values.delete(key);
+        this.expiries.delete(key);
+        return 1;
+      }
+      return 0;
     }
-    return 0;
+    if (script === RENEW_LOCK_SCRIPT) {
+      const ttl = Number(args[1]);
+      if (key !== undefined && this.raw(key) === args[0] && Number.isFinite(ttl)) {
+        this.renewals.push(key);
+        this.expiries.set(key, Date.now() + ttl);
+        return 1;
+      }
+      return 0;
+    }
+    throw new Error("Unexpected Lua script.");
   }
 }
 
@@ -63,11 +74,14 @@ describe("Redis state backend", () => {
     client = new FakeRedisClient();
   });
 
-  function backend(overrides: { key?: string; lockTimeoutMs?: number } = {}) {
+  function backend(
+    overrides: { key?: string; lockTimeoutMs?: number; lockTtlMs?: number } = {},
+  ) {
     return createRedisStateBackend({
       client,
       key: overrides.key ?? "voxen:state",
       lockTimeoutMs: overrides.lockTimeoutMs ?? 200,
+      lockTtlMs: overrides.lockTtlMs ?? 10_000,
     });
   }
 
@@ -165,5 +179,41 @@ describe("Redis state backend", () => {
       "Timed out acquiring the Redis state lock",
     );
     expect(client.values.get("voxen:state:lock")).toBe("someone-else");
+  });
+
+  it("renews the lock during a slow write and always releases it", async () => {
+    const state = backend({ lockTtlMs: 30 });
+
+    await state.write(async (document) => {
+      document.counters.slow = 1;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    });
+
+    expect(client.renewals.length).toBeGreaterThan(0);
+    expect(client.values.has("voxen:state:lock")).toBe(false);
+    expect(await state.read((document) => document.counters.slow)).toBe(1);
+  });
+
+  it("propagates store failures instead of returning empty state", async () => {
+    const broken: RedisStateClient = {
+      async get() {
+        throw new Error("redis unavailable");
+      },
+      async set() {
+        return "OK";
+      },
+      async eval() {
+        return 0;
+      },
+    };
+    const state = createRedisStateBackend({ client: broken, key: "voxen:state" });
+
+    await expect(state.read((document) => document.budget)).rejects.toThrow(
+      "redis unavailable",
+    );
+  });
+
+  it("refuses an empty state key", () => {
+    expect(() => backend({ key: "   " })).toThrow("must not be empty");
   });
 });

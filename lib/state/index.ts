@@ -25,6 +25,7 @@ export { createMemoryStateBackend } from "./memory";
 export {
   createRedisStateBackend,
   RELEASE_LOCK_SCRIPT,
+  RENEW_LOCK_SCRIPT,
   type RedisStateBackend,
   type RedisStateBackendOptions,
   type RedisStateClient,

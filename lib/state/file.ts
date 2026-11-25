@@ -92,11 +92,13 @@ export function createFileStateBackend(
     renameSync(temporary, filePath);
   }
 
-  async function write<T>(mutate: (document: StateDocument) => T): Promise<T> {
+  async function write<T>(
+    mutate: (document: StateDocument) => T | Promise<T>,
+  ): Promise<Awaited<T>> {
     acquire();
     try {
       const document = load();
-      const result = mutate(document);
+      const result = await mutate(document);
       save(document);
       return result;
     } finally {

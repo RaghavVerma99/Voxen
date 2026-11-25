@@ -77,8 +77,12 @@ export interface StateBackend {
   readonly name: StateBackendName;
   /** Reads an isolated snapshot or projection without taking a write lock. */
   read<T>(select: (document: Readonly<StateDocument>) => T): Promise<T>;
-  /** Atomically mutates and persists the document. Must not be reentered. */
-  write<T>(mutate: (document: StateDocument) => T): Promise<T>;
+  /**
+   * Atomically mutates and persists the document. Must not be reentered.
+   * Remote adapters await the mutator before saving, so async work inside it
+   * is part of the critical section.
+   */
+  write<T>(mutate: (document: StateDocument) => T | Promise<T>): Promise<Awaited<T>>;
   /** Clears one section, or the whole document when no section is given. */
   reset(section?: StateSection): Promise<void>;
 }

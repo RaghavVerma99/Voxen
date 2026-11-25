@@ -32,6 +32,12 @@ export const RELEASE_LOCK_SCRIPT = `if redis.call("get", KEYS[1]) == ARGV[1] the
 end
 return 0`;
 
+/** Extends a lock only while it still belongs to the active writer. */
+export const RENEW_LOCK_SCRIPT = `if redis.call("get", KEYS[1]) == ARGV[1] then
+  return redis.call("pexpire", KEYS[1], ARGV[2])
+end
+return 0`;
+
 const LOCK_RETRY_MS = 25;
 
 type RawRedisClient = RedisClientType;
@@ -86,6 +92,8 @@ export function createRedisStateBackend(
   const lockKey = `${stateKey}:lock`;
   const lockTtlMs = Math.max(1, Math.floor(options.lockTtlMs ?? config.redisLockTtlMs));
   const lockTimeoutMs = Math.max(0, options.lockTimeoutMs ?? config.redisLockTimeoutMs);
+  const renewEveryMs = Math.max(1, Math.floor(lockTtlMs / 3));
+  if (!stateKey.trim()) throw new Error("REDIS_STATE_KEY must not be empty.");
   const injected = options.client;
 
   let owned: RawRedisClient | null = null;
@@ -98,7 +106,13 @@ export function createRedisStateBackend(
       // node-redis reconnects on its own; command failures still surface to
       // callers. The listener prevents an unhandled 'error' event.
       redis.on("error", () => {});
-      await redis.connect();
+      try {
+        await redis.connect();
+      } catch {
+        // Never surface the connection URL: it may embed credentials.
+        redis.destroy();
+        throw new Error("Unable to connect to the Redis state store.");
+      }
       owned = redis;
       return wrapClient(redis);
     })();
@@ -139,15 +153,26 @@ export function createRedisStateBackend(
     }
   }
 
-  async function write<T>(mutate: (document: StateDocument) => T): Promise<T> {
+  async function write<T>(
+    mutate: (document: StateDocument) => T | Promise<T>,
+  ): Promise<Awaited<T>> {
     const store = await client();
     const token = await acquire(store);
+    // Keep the lock alive for slow writes. If renewal fails, the original TTL
+    // still reclaims a crashed worker instead of deadlocking the app.
+    const renewal = setInterval(() => {
+      void store
+        .eval(RENEW_LOCK_SCRIPT, [lockKey], [token, String(lockTtlMs)])
+        .catch(() => {});
+    }, renewEveryMs);
+    renewal.unref?.();
     try {
       const document = await load(store);
-      const result = mutate(document);
+      const result = await mutate(document);
       await store.set(stateKey, JSON.stringify(document));
       return result;
     } finally {
+      clearInterval(renewal);
       // A failure here must not mask the write result; the lock expires by TTL.
       try {
         await store.eval(RELEASE_LOCK_SCRIPT, [lockKey], [token]);

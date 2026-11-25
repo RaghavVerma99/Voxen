@@ -1,4 +1,4 @@
-import { emptyState, type StateBackend } from "./contract";
+import { emptyState, type StateBackend, type StateDocument } from "./contract";
 
 /**
  * Default single-process backend. The document is kept in memory, so all
@@ -12,8 +12,10 @@ export function createMemoryStateBackend(): StateBackend {
     async read(select) {
       return select(document);
     },
-    async write(mutate) {
-      return mutate(document);
+    async write<T>(
+      mutate: (document: StateDocument) => T | Promise<T>,
+    ): Promise<Awaited<T>> {
+      return await mutate(document);
     },
     async reset(section) {
       const fresh = emptyState();
