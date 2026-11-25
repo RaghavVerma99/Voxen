@@ -12,6 +12,7 @@
     "build": "next build",
     "start": "node scripts/start.mjs",
     "test": "vitest run",
+    "test:redis": "vitest run tests/redis-integration.test.ts",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:install": "playwright install chromium",

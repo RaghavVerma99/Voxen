@@ -264,6 +264,7 @@ Open streams report `TURN_TIMEOUT` in an `error` event. Production 5xx messages 
 ```bash
 npm run check          # typecheck + 198 unit tests
 npm test               # Vitest, no network or API key
+npm run test:redis     # opt-in Redis integration smoke test
 npm run test:e2e       # Playwright browser E2E (8 scenarios)
 npm run test:e2e:install
 npm run audit          # production dependency audit
@@ -274,7 +275,7 @@ npm run eval:live      # score labeled live traces
 npm run eval:baseline  # regenerate evals/baseline.json
 ```
 
-Unit tests need no API key or network. Playwright mocks the OpenAI/app routes and runs the real browser client on port 3100 with a placeholder key, Realtime enabled, and access codes disabled. CI runs `npm ci`, `npm run audit`, typecheck, unit tests, `npm run eval:gate`, build, and Playwright. On Windows PowerShell, use `npm.cmd`.
+Unit tests need no API key or network. `npm run test:redis` skips unless `REDIS_INTEGRATION=1` and `REDIS_URL` are set; CI starts a Redis service and runs it. Playwright mocks the OpenAI/app routes and runs the real browser client on port 3100 with a placeholder key, Realtime enabled, and access codes disabled. CI runs `npm ci`, `npm run audit`, typecheck, unit tests, the Redis integration check, `npm run eval:gate`, build, and Playwright. On Windows PowerShell, use `npm.cmd`.
 
 The bundled offline eval reports **pass@1=55%, pass@5=100%**. `eval:gate` enforces `evals/thresholds.json` and `evals/baseline.json`; regenerate the baseline only after an intentional quality change.
 
