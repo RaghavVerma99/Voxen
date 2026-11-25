@@ -262,7 +262,7 @@ Open streams report `TURN_TIMEOUT` in an `error` event. Production 5xx messages 
 ## Development
 
 ```bash
-npm run check          # typecheck + 198 unit tests
+npm run check          # typecheck + 200 unit tests
 npm test               # Vitest, no network or API key
 npm run test:redis     # opt-in Redis integration smoke test
 npm run test:e2e       # Playwright browser E2E (8 scenarios)
