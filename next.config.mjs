@@ -5,6 +5,9 @@ const nextConfig = {
   output: "standalone",
   poweredByHeader: false,
   reactStrictMode: true,
+  // The Redis client uses Node sockets; let Node load it natively in the
+  // standalone server instead of bundling it into each route.
+  serverExternalPackages: ["redis"],
   async headers() {
     return [
       {
