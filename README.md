@@ -132,17 +132,21 @@ Production fails closed when the access gate or required identity secret is miss
 
 | Variable | Default | Notes |
 | --- | --- | --- |
-| `STATE_BACKEND` | `memory` | `memory` is per process; `file` shares one atomic document on a mounted volume. |
+| `STATE_BACKEND` | `memory` | `memory` is per process; `file` shares one document on a mounted volume; `redis` shares it across machines. |
 | `STATE_STORE_PATH` | `.data/voxen-state.json` | State file for the `file` backend. |
-| `STATE_LOCK_TIMEOUT_MS` | `5000` | Max wait for the cross-process lock. |
-| `STATE_LOCK_STALE_MS` | `10000` | Age at which an abandoned lock may be reclaimed. |
+| `STATE_LOCK_TIMEOUT_MS` | `5000` | Max wait for the file lock. |
+| `STATE_LOCK_STALE_MS` | `10000` | Age at which an abandoned file lock may be reclaimed. |
+| `REDIS_URL` | `redis://127.0.0.1:6379` | Redis connection URL for the `redis` backend. |
+| `REDIS_STATE_KEY` | `voxen:state` | Single JSON document key; `:lock` holds the distributed write lock. |
+| `REDIS_LOCK_TTL_MS` | `10000` | Lock expiry; renewed during long writes and reclaimed if a worker dies. |
+| `REDIS_LOCK_TIMEOUT_MS` | `5000` | Max wait to acquire the Redis write lock. |
 | `WORKFLOW_ENABLED` | `true` | `false` removes scheduling tools and the `workflow` event. |
 | `WORKFLOW_STORE_PATH` | `.data/voxen-workflow.json` | Atomic appointment store. |
 | `APPOINTMENT_MINUTES` | `30` | Slot length and alignment. |
 | `CONFIRMATION_TTL_MS` | `600000` | Lifetime of a prepared appointment. |
 | `SHARE_TTL_MS` | `86400000` | Lifetime of a shareable transcript token. |
 
-Slots are future weekdays, 09:00–17:00 UTC. `STATE_BACKEND=file` shares caps on one host; use a Redis/Postgres `StateBackend` across machines. A corrupt state file fails closed.
+Slots are future weekdays, 09:00–17:00 UTC. `STATE_BACKEND=file` shares caps on one host; `STATE_BACKEND=redis` shares one JSON document across machines. Set `REDIS_URL` (credentials belong in the URL, which is never logged) and a unique `REDIS_STATE_KEY` per deployment. Writes take a lock with a token-checked release and periodic renewal; a worker that dies is reclaimed when the TTL expires. Reads only touch Redis when selected, and connection or JSON errors fail closed instead of returning empty state. A corrupt state file or document fails closed. The workflow/appointment store remains a separate local atomic file, so multi-host workflow state still needs a shared volume.
 
 ### Realtime and eval tracing
 
@@ -258,7 +262,7 @@ Open streams report `TURN_TIMEOUT` in an `error` event. Production 5xx messages 
 ## Development
 
 ```bash
-npm run check          # typecheck + 185 unit tests
+npm run check          # typecheck + 198 unit tests
 npm test               # Vitest, no network or API key
 npm run test:e2e       # Playwright browser E2E (8 scenarios)
 npm run test:e2e:install
@@ -287,7 +291,7 @@ docker build -t voxen .
 docker run --env-file .env.local -p 3000:3000 voxen
 ```
 
-Set production secrets before starting, especially `OPENAI_API_KEY` and either a long `ACCESS_CODE` or `REQUIRE_ACCESS_CODE=false`. Mount a writable volume for `/data` (uid 1001), and set `WORKFLOW_STORE_PATH` and, for local multi-instance caps, `STATE_BACKEND=file` with `STATE_STORE_PATH=/data/voxen-state.json`.
+Set production secrets before starting, especially `OPENAI_API_KEY` and either a long `ACCESS_CODE` or `REQUIRE_ACCESS_CODE=false`. Mount a writable volume for `/data` (uid 1001) and set `WORKFLOW_STORE_PATH`. For local multi-instance caps use `STATE_BACKEND=file` with `STATE_STORE_PATH=/data/voxen-state.json`; for multiple machines use `STATE_BACKEND=redis` with `REDIS_URL` and a deployment-specific `REDIS_STATE_KEY`. The Redis backend needs no writable state volume, but workflow state still lives in the mounted file.
 
 Production checklist:
 
@@ -296,7 +300,7 @@ Production checklist:
 - Confirm `/api/ready` reports `ready` and the expected TTS chain.
 - Watch `/api/metrics` for p95 latency and provider failures.
 - Keep `REALTIME_ENABLED=false` until tested against your browser matrix.
-- Use a shared `StateBackend` before scaling across machines.
+- Use `STATE_BACKEND=redis` with a reachable `REDIS_URL` before scaling across machines; keep workflow state on a shared volume.
 
 ## Project layout
 
@@ -316,7 +320,7 @@ Dockerfile next.config.mjs vitest.config.mts playwright.config.ts
 
 ## Roadmap
 
-1. Remote shared state: Redis/Postgres `StateBackend` and a shared workflow store.
+1. Remote workflow state: shared appointment store and a Postgres `StateBackend` option.
 2. Payment provider integration: checkout, webhooks, and invoice finalization.
 3. Workflow depth: rescheduling, reminders, and support handoff records.
 4. Realtime hardening: broader browser matrix and measured latency targets.
