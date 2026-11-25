@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { config } from "@/lib/config";
 import {
   createFileStateBackend,
@@ -104,6 +104,23 @@ function contract(name: string, make: () => StateBackend): void {
 
 contract("memory", () => createMemoryStateBackend());
 contract("file", () => createFileStateBackend(contractPath));
+
+describe("backend selection", () => {
+  afterEach(async () => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it("selects the Redis adapter when configured", async () => {
+    vi.stubEnv("STATE_BACKEND", "redis");
+    vi.resetModules();
+
+    const { resetStateBackend, stateBackend } = await import("@/lib/state");
+
+    expect(stateBackend().name).toBe("redis");
+    resetStateBackend();
+  });
+});
 
 describe("file backend", () => {
   it("shares one document across instances using the same file", async () => {

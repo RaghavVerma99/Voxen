@@ -2,6 +2,7 @@ import { config } from "../config";
 import type { StateBackend } from "./contract";
 import { createFileStateBackend } from "./file";
 import { createMemoryStateBackend } from "./memory";
+import { createRedisStateBackend } from "./redis";
 
 export type {
   AccountPlan,
@@ -21,10 +22,19 @@ export type {
 } from "./contract";
 export { createFileStateBackend } from "./file";
 export { createMemoryStateBackend } from "./memory";
+export {
+  createRedisStateBackend,
+  RELEASE_LOCK_SCRIPT,
+  type RedisStateBackend,
+  type RedisStateBackendOptions,
+  type RedisStateClient,
+  type RedisSetOptions,
+} from "./redis";
 
 let current: StateBackend | null = null;
 
 function create(): StateBackend {
+  if (config.stateBackend === "redis") return createRedisStateBackend();
   return config.stateBackend === "file"
     ? createFileStateBackend()
     : createMemoryStateBackend();
