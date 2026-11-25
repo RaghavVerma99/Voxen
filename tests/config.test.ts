@@ -40,6 +40,44 @@ describe("shared state configuration", () => {
     expect(config.stateBackend).toBe("file");
     expect(config.stateStorePath).toBe(".data/shared.json");
   });
+
+  it("uses safe local defaults for the Redis backend", async () => {
+    for (const name of [
+      "STATE_BACKEND",
+      "REDIS_URL",
+      "REDIS_STATE_KEY",
+      "REDIS_LOCK_TTL_MS",
+      "REDIS_LOCK_TIMEOUT_MS",
+    ]) {
+      vi.stubEnv(name, undefined);
+    }
+    vi.resetModules();
+
+    const { config } = await import("@/lib/config");
+
+    expect(config.stateBackend).toBe("memory");
+    expect(config.redisUrl).toBe("redis://127.0.0.1:6379");
+    expect(config.redisStateKey).toBe("voxen:state");
+    expect(config.redisLockTtlMs).toBe(10_000);
+    expect(config.redisLockTimeoutMs).toBe(5_000);
+  });
+
+  it("accepts explicit Redis connection, key and lock settings", async () => {
+    vi.stubEnv("STATE_BACKEND", "redis");
+    vi.stubEnv("REDIS_URL", "redis://cache.internal:6380/2");
+    vi.stubEnv("REDIS_STATE_KEY", "tenant:voxen");
+    vi.stubEnv("REDIS_LOCK_TTL_MS", "4000");
+    vi.stubEnv("REDIS_LOCK_TIMEOUT_MS", "2000");
+    vi.resetModules();
+
+    const { config } = await import("@/lib/config");
+
+    expect(config.stateBackend).toBe("redis");
+    expect(config.redisUrl).toBe("redis://cache.internal:6380/2");
+    expect(config.redisStateKey).toBe("tenant:voxen");
+    expect(config.redisLockTtlMs).toBe(4_000);
+    expect(config.redisLockTimeoutMs).toBe(2_000);
+  });
 });
 
 describe("eval trace configuration", () => {

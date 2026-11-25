@@ -5,7 +5,7 @@ function toNumber(value: string | undefined, fallback: number): number {
 }
 
 export type SearchProvider = "auto" | "tavily" | "duckduckgo";
-export type StateBackendName = "memory" | "file";
+export type StateBackendName = "memory" | "file" | "redis";
 
 export type TtsProvider = "speech" | "realtime";
 export type TtsFallbackProvider = TtsProvider | "none";
@@ -17,7 +17,8 @@ function toSearchProvider(value: string | undefined): SearchProvider {
 }
 
 function toStateBackend(value: string | undefined): StateBackendName {
-  return (value ?? "").trim().toLowerCase() === "file" ? "file" : "memory";
+  const normalized = (value ?? "").trim().toLowerCase();
+  return normalized === "file" || normalized === "redis" ? normalized : "memory";
 }
 
 function toTtsProvider(value: string | undefined, fallback: TtsProvider): TtsProvider {
@@ -128,12 +129,17 @@ export const config = {
   evalTraceMaxAnswerChars: toNumber(process.env.EVAL_TRACE_MAX_ANSWER_CHARS, 4_000),
 
   // Shared state. `memory` is per process; `file` shares one atomic document
-  // across instances on the same host or mounted volume. Redis/Postgres can
-  // implement the same contract when state must span machines.
+  // across instances on the same host or mounted volume; `redis` shares it
+  // across machines. All three implement the same asynchronous contract.
   stateBackend: toStateBackend(process.env.STATE_BACKEND),
   stateStorePath: process.env.STATE_STORE_PATH ?? ".data/voxen-state.json",
   stateLockTimeoutMs: toNumber(process.env.STATE_LOCK_TIMEOUT_MS, 5_000),
   stateLockStaleMs: toNumber(process.env.STATE_LOCK_STALE_MS, 10_000),
+  redisUrl: process.env.REDIS_URL ?? "redis://127.0.0.1:6379",
+  redisStateKey: process.env.REDIS_STATE_KEY ?? "voxen:state",
+  // A lock must outlive the slowest write but still expire if a worker dies.
+  redisLockTtlMs: toNumber(process.env.REDIS_LOCK_TTL_MS, 10_000),
+  redisLockTimeoutMs: toNumber(process.env.REDIS_LOCK_TIMEOUT_MS, 5_000),
 
   // Conversation state
   maxHistoryMessages: toNumber(process.env.MAX_HISTORY_MESSAGES, 20),

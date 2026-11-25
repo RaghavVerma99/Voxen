@@ -1,4 +1,4 @@
-export type StateBackendName = "memory" | "file";
+export type StateBackendName = "memory" | "file" | "redis";
 
 export interface StoredMessage {
   role: "system" | "user" | "assistant";
